@@ -1,0 +1,106 @@
+const { Vec3 } = require('vec3')
+const { Movements, goals } = require('mineflayer-pathfinder')
+const { approachChest, sleep, isNearBlock, pathfinderGoto } = require('./movement')
+
+const FACE_OFFSETS = [
+    new Vec3(1, 0, 0),
+    new Vec3(-1, 0, 0),
+    new Vec3(0, 0, 1),
+    new Vec3(0, 0, -1),
+]
+
+/**
+ * 打开箱子/容器
+ * 优先使用 GoalLookAtBlock 走到能看到箱子面的位置；
+ * 若失败则逐一尝试四个水平相邻位置。
+ * @see mineflayer API: bot.openContainer(containerBlock, direction?, cursorPos?)
+ * @see mineflayer-pathfinder GoalLookAtBlock — "Path into a position where a blockface is visible"
+ */
+async function openChestContainer(bot, block, options = {}) {
+    const timeoutMs = options.timeoutMs ?? 20000
+    const pos = block.position
+
+    if (bot.currentWindow) {
+        try { bot.closeWindow(bot.currentWindow) } catch {}
+        await sleep(200)
+    }
+
+    const deadline = Date.now() + timeoutMs
+
+    // 第一步：用 GoalLookAtBlock 让 pathfinder 自动选择能看到箱子面的位置
+    try {
+        await approachChest(bot, pos, Math.min(timeoutMs, 15000))
+    } catch (e) {
+        console.log(`[箱子] GoalLookAtBlock 失败: ${e.message}，将尝试四面靠近`)
+    }
+
+    // 检查是否已可交互
+    const tryOpen = async () => {
+        bot.clearControlStates()
+        await sleep(200)
+        if (!isNearBlock(bot, pos, 4.5)) return null
+        await bot.lookAt(pos.offset(0.5, 0.5, 0.5), true)
+        await sleep(100)
+        return await bot.openContainer(block)
+    }
+
+    if (isNearBlock(bot, pos, 4.5)) {
+        try {
+            const w = await tryOpen()
+            if (w) return w
+        } catch (e) {
+            console.log(`[箱子] 当前位置开箱失败: ${e.message}`)
+        }
+    }
+
+    // 第二步：逐一尝试箱子四个水平相邻位置
+    const botPos = bot.entity.position
+    const sortedFaces = FACE_OFFSETS
+        .map(offset => ({
+            offset,
+            standPos: pos.plus(offset),
+            dist: botPos.distanceTo(pos.plus(offset).offset(0.5, 0.5, 0.5))
+        }))
+        .filter(({ standPos }) => {
+            const atFeet = bot.blockAt(standPos)
+            const above = bot.blockAt(standPos.offset(0, 1, 0))
+            const passable = (!atFeet || atFeet.boundingBox === 'empty')
+                && (!above || above.boundingBox === 'empty')
+            if (!passable) {
+                console.log(`[箱子] 面 (${standPos.x},${standPos.z}) 被 ${atFeet?.name || '?'} 阻挡，跳过`)
+            }
+            return passable
+        })
+        .sort((a, b) => a.dist - b.dist)
+
+    for (const { standPos } of sortedFaces) {
+        const remain = deadline - Date.now()
+        if (remain < 3000) break
+
+        console.log(`[箱子] 尝试从 (${standPos.x},${standPos.y},${standPos.z}) 靠近箱子`)
+        bot.clearControlStates()
+
+        try {
+            await pathfinderGoto(
+                bot,
+                new goals.GoalNear(standPos.x + 0.5, standPos.y, standPos.z + 0.5, 1),
+                Math.min(remain, 12000)
+            )
+        } catch (e) {
+            console.log(`[箱子] 寻路到 (${standPos.x},${standPos.z}) 失败: ${e.message}`)
+            continue
+        }
+
+        try {
+            const w = await tryOpen()
+            if (w) return w
+        } catch (e) {
+            console.log(`[箱子] 在 (${standPos.x},${standPos.z}) 开箱失败: ${e.message}`)
+        }
+    }
+
+    const dist = bot.entity.position.distanceTo(pos.offset(0.5, 0.5, 0.5)).toFixed(1)
+    throw new Error(`无法打开箱子(距${dist}格)`)
+}
+
+module.exports = { openChestContainer }

@@ -1,0 +1,28 @@
+{
+  "name": "minecraft-farm-bot",
+  "version": "1.0.0",
+  "description": "Minecraft Farm Bot",
+  "main": "bots/farmer/index.js",
+  "scripts": {
+    "start": "node bots/farmer/index.js",
+    "farmer": "node bots/farmer/index.js",
+    "farmer:dev": "nodemon bots/farmer/index.js",
+    "farmmaster": "node bots/farmMaster/index.js",
+    "farmmaster:dev": "nodemon bots/farmMaster/index.js"
+  },
+  "devDependencies": {
+    "eslint": "^10.4.0",
+    "nodemon": "^2.0.22"
+  },
+  "dependencies": {
+    "minecraft-data": "^3.110.2",
+    "mineflayer": "^4.37.1",
+    "mineflayer-collectblock": "^1.6.0",
+    "mineflayer-pathfinder": "^2.4.5",
+    "mineflayer-statemachine": "^1.7.0",
+    "vec3": "^0.1.7"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}

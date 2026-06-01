@@ -1,0 +1,55 @@
+{
+    "server": {
+        "host": "localhost",
+        "port": 22224,
+        "username": "FarmMaster",
+        "version": "1.21.11",
+        "plugins": {},
+        "hideErrors": false,
+        "logErrors": true,
+        "loadInternalPlugins": true,
+        "client": null,
+        "brand": "vanilla",
+        "respawn": true,
+        "validateChannelProtocol": false,
+        "majorVersion": "1.21",
+        "protocolVersion": 774,
+        "auth": "offline"
+    },
+    "pos1": {
+        "x": 1025,
+        "y": 69,
+        "z": 599
+    },
+    "pos2": {
+        "x": 1026,
+        "y": 60,
+        "z": 598
+    },
+    "workArea": {
+        "minX": 1009,
+        "maxX": 1029,
+        "minZ": 569,
+        "maxZ": 604
+    },
+    "seeds": [
+        {
+            "name": "wheat_seeds",
+            "ratio": 40
+        },
+        {
+            "name": "carrot",
+            "ratio": 20
+        },
+        {
+            "name": "potato",
+            "ratio": 20
+        },
+        {
+            "name": "beetroot_seeds",
+            "ratio": 20
+        }
+    ],
+    "harvestWaitSeconds": 60,
+    "maturityThreshold": 95
+}

@@ -1,0 +1,15 @@
+{
+  "server": {
+    "host": "localhost",
+    "port": 22224,
+    "username": "FarmerBot",
+    "version": "1.21.11"
+  },
+  "workArea": {
+    "minX": 1116,
+    "maxX": 1142,
+    "minZ": 589,
+    "maxZ": 597
+  },
+  "currentCrop": "wheat"
+}
