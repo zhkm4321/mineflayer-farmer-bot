@@ -62,7 +62,7 @@ npm run farmmaster:dev
         "host": "localhost",
         "port": 25565,
         "username": "FarmerBot",
-        "version": "1.21.1"
+        "version": "1.21.11"
     },
     "workArea": {
         "minX": 100, "maxX": 120,
@@ -102,7 +102,7 @@ npm run farmmaster:dev
         "host": "localhost",
         "port": 25565,
         "username": "FarmMaster",
-        "version": "1.21.1"
+        "version": "1.21.11"
     },
     "pos1": { "x": 0, "y": 64, "z": 0 },
     "pos2": { "x": 0, "y": 64, "z": 100 },
