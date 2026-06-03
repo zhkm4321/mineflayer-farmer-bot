@@ -20,6 +20,7 @@ const { BehaviorGetSeeds } = require('./behaviors/BehaviorGetSeeds')
 const { BehaviorGoTo } = require('./behaviors/BehaviorGoTo')
 const { BehaviorPlantSeeds } = require('./behaviors/BehaviorPlantSeeds')
 const { BehaviorWaitMaturity } = require('./behaviors/BehaviorWaitMaturity')
+const { BehaviorSleep } = require('./behaviors/BehaviorSleep')
 
 const reconnectConfig = { maxAttempts: 10, delay: 5000, attempts: 0 }
 
@@ -51,6 +52,8 @@ function createBot() {
         console.log(`Bot ${bot.username} 已连接到服务器`)
         reconnectConfig.attempts = 0
         console.log(`协议版本: ${bot.protocolVersion}, 客户端版本: ${bot.version}`)
+        const pos = bot.entity.position
+        console.log(`当前坐标: (${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)})`)
 
         configureMovements(bot)
         setupStateMachine()
@@ -113,15 +116,22 @@ function setupStateMachine() {
     const waitHarvest = new BehaviorWait(bot, masterData, () => masterData.harvestWaitSeconds, '收割等待')
     const deactivateLever = new BehaviorOperateLever(bot, masterData, 'off')
     const getSeeds = new BehaviorGetSeeds(bot, masterData)
-    const gotoPos1 = new BehaviorGoTo(bot, masterData, () => masterData.pos1, '前往播种区')
+    const getWaypoints = () => masterData.waypoints
+    const gotoPos1 = new BehaviorGoTo(bot, masterData, () => masterData.pos1, '前往播种区', {
+        getWaypoints, reverseWaypoints: false
+    })
     const plantSeeds = new BehaviorPlantSeeds(bot, masterData)
-    const gotoPos2 = new BehaviorGoTo(bot, masterData, () => masterData.pos2, '前往拉杆区')
+    const gotoPos2 = new BehaviorGoTo(bot, masterData, () => masterData.pos2, '前往拉杆区', {
+        getWaypoints, reverseWaypoints: true
+    })
     const waitMaturity = new BehaviorWaitMaturity(bot, masterData)
+    const sleepBehavior = new BehaviorSleep(bot, masterData)
 
     // 状态机流程：
-    // Idle → WaitMaturity（检测成熟度）
-    //   ├─ 有成熟作物 → CheckHunger → ActivateLever(开) → Wait(60s) → DeactivateLever(关) → GetSeeds → ...
-    //   └─ 无作物 → GetSeeds → GoTo(pos1) → PlantSeeds → GoTo(pos2) → WaitMaturity（循环）
+    // 夜晚检测：WaitMaturity/WaitHarvest/Idle → Sleep → WaitMaturity
+    // Idle → WaitMaturity → CheckHunger（必经）→ Eat?
+    //   ├─ 需要收割 → ActivateLever(开) → Wait → DeactivateLever(关) → GetSeeds → GoTo(pos1) → Plant → GoTo(pos2) → WaitMaturity
+    //   └─ 需要播种 → GetSeeds → GoTo(pos1) → PlantSeeds → GoTo(pos2) → WaitMaturity
     const transitions = [
         // Idle -> WaitMaturity
         new StateTransition({
@@ -130,37 +140,43 @@ function setupStateMachine() {
             shouldTransition: () => idle.isReady && masterData.isAutoFarming && !masterData.stopRequested
         }),
 
-        // WaitMaturity -> CheckHunger: 需要收割
+        // WaitMaturity -> CheckHunger（总是先检查饥饿）
         new StateTransition({
             parent: waitMaturity,
             child: checkHunger,
-            shouldTransition: () => waitMaturity.isFinished && waitMaturity.needsHarvest
+            shouldTransition: () => waitMaturity.isFinished
         }),
 
-        // WaitMaturity -> GetSeeds: 无作物，跳过收割直接播种
-        new StateTransition({
-            parent: waitMaturity,
-            child: getSeeds,
-            shouldTransition: () => waitMaturity.isFinished && !waitMaturity.needsHarvest
-        }),
-
-        // CheckHunger -> Eat / ActivateLever
+        // CheckHunger -> Eat（饿了先吃）
         new StateTransition({
             parent: checkHunger,
             child: eat,
             shouldTransition: () => checkHunger.checked && checkHunger.needsFood
         }),
+        // CheckHunger -> ActivateLever（不饿 + 需要收割）
         new StateTransition({
             parent: checkHunger,
             child: activateLever,
-            shouldTransition: () => checkHunger.checked && !checkHunger.needsFood
+            shouldTransition: () => checkHunger.checked && !checkHunger.needsFood && masterData._needsHarvest
+        }),
+        // CheckHunger -> GetSeeds（不饿 + 需要播种）
+        new StateTransition({
+            parent: checkHunger,
+            child: getSeeds,
+            shouldTransition: () => checkHunger.checked && !checkHunger.needsFood && !masterData._needsHarvest
         }),
 
-        // Eat -> ActivateLever
+        // Eat -> ActivateLever（吃完 + 需要收割）
         new StateTransition({
             parent: eat,
             child: activateLever,
-            shouldTransition: () => eat.isFinished
+            shouldTransition: () => eat.isFinished && masterData._needsHarvest
+        }),
+        // Eat -> GetSeeds（吃完 + 需要播种）
+        new StateTransition({
+            parent: eat,
+            child: getSeeds,
+            shouldTransition: () => eat.isFinished && !masterData._needsHarvest
         }),
 
         // ActivateLever -> WaitHarvest
@@ -184,11 +200,18 @@ function setupStateMachine() {
             shouldTransition: () => deactivateLever.isFinished
         }),
 
-        // GetSeeds -> GoToPos1
+        // GetSeeds -> Idle（锄头不足时等待）
+        new StateTransition({
+            parent: getSeeds,
+            child: idle,
+            shouldTransition: () => getSeeds.isFinished && getSeeds.noHoes
+        }),
+
+        // GetSeeds -> GoToPos1（物资充足时继续）
         new StateTransition({
             parent: getSeeds,
             child: gotoPos1,
-            shouldTransition: () => getSeeds.isFinished
+            shouldTransition: () => getSeeds.isFinished && !getSeeds.noHoes
         }),
 
         // GoToPos1 -> PlantSeeds
@@ -212,9 +235,27 @@ function setupStateMachine() {
             shouldTransition: () => gotoPos2.isFinished
         }),
 
+        // 夜晚睡觉：等待/空闲状态 -> Sleep
+        ...[waitMaturity, waitHarvest, idle].map(state =>
+            new StateTransition({
+                parent: state,
+                child: sleepBehavior,
+                name: 'sleep',
+                shouldTransition: () => BehaviorSleep.isNight(bot) && !bot.isSleeping
+            })
+        ),
+
+        // Sleep -> WaitMaturity（醒来后继续工作）
+        new StateTransition({
+            parent: sleepBehavior,
+            child: waitMaturity,
+            shouldTransition: () => sleepBehavior.isFinished
+        }),
+
         // Stop: 任何状态 -> Idle
         ...[waitMaturity, checkHunger, eat, activateLever, waitHarvest,
-            deactivateLever, getSeeds, gotoPos1, plantSeeds, gotoPos2
+            deactivateLever, getSeeds, gotoPos1, plantSeeds, gotoPos2,
+            sleepBehavior
         ].map(state =>
             new StateTransition({
                 parent: state,

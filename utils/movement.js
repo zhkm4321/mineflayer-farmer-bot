@@ -47,6 +47,16 @@ function configureMovements(bot) {
     }
 
     bot.pathfinder.setMovements(movements)
+
+    if (!bot._farmlandJumpGuard) {
+        bot._farmlandJumpGuard = true
+        bot.on('physicsTick', () => {
+            if (bot.controlState.jump && isOnNoJumpBlock(bot)) {
+                bot.setControlState('jump', false)
+            }
+        })
+    }
+
     return movements
 }
 
@@ -83,6 +93,7 @@ function isNearBlock(bot, pos, reach = REACH) {
 
 /**
  * pathfinder.goto 包装：避免超时 stop() 与 PathStopped 竞态
+ * 增加卡住检测：执行中如果 bot 持续未移动则尝试跳跃越过障碍
  * @see mineflayer-pathfinder lib/goto.js
  */
 async function pathfinderGoto(bot, goal, timeoutMs) {
@@ -91,6 +102,23 @@ async function pathfinderGoto(bot, goal, timeoutMs) {
         timedOut = true
         bot.pathfinder.setGoal(null)
     }, timeoutMs)
+
+    let lastPos = bot.entity.position.clone()
+    let stuckTicks = 0
+    const stuckChecker = () => {
+        const pos = bot.entity.position
+        const moved = pos.distanceTo(lastPos)
+        if (moved < 0.03) {
+            stuckTicks++
+            if (stuckTicks >= 3 && bot.entity.onGround) {
+                safeJump(bot)
+            }
+        } else {
+            stuckTicks = 0
+        }
+        lastPos = pos.clone()
+    }
+    const stuckInterval = setInterval(stuckChecker, 250)
 
     try {
         await bot.pathfinder.goto(goal)
@@ -107,6 +135,8 @@ async function pathfinderGoto(bot, goal, timeoutMs) {
         throw err
     } finally {
         clearTimeout(timer)
+        clearInterval(stuckInterval)
+        bot.setControlState('jump', false)
     }
 }
 
@@ -186,6 +216,38 @@ async function gotoNear(bot, pos, range = 2, timeoutMs = 10000, options = {}) {
     }
 }
 
+const NO_JUMP_BLOCKS = new Set(['farmland', 'birch_slab'])
+
+/** 脚下是否为禁止跳跃的方块 */
+function isOnNoJumpBlock(bot) {
+    const pos = bot.entity.position
+    const below = bot.blockAt(new Vec3(Math.floor(pos.x), Math.floor(pos.y) - 1, Math.floor(pos.z)))
+    return below != null && NO_JUMP_BLOCKS.has(below.name)
+}
+
+/** 检测前方是否有需要跳跃才能越过的方块 */
+function hasBlockAhead(bot) {
+    const pos = bot.entity.position
+    const yaw = bot.entity.yaw
+    const dx = -Math.sin(yaw)
+    const dz = -Math.cos(yaw)
+    const ahead = new Vec3(
+        Math.floor(pos.x + dx * 0.8),
+        Math.floor(pos.y),
+        Math.floor(pos.z + dz * 0.8)
+    )
+    const block = bot.blockAt(ahead)
+    return block && block.boundingBox === 'block'
+}
+
+/** 安全跳跃：在禁跳方块上不跳 */
+function safeJump(bot) {
+    if (isOnNoJumpBlock(bot)) return false
+    bot.setControlState('jump', true)
+    setTimeout(() => bot.setControlState('jump', false), 120)
+    return true
+}
+
 /** 短距离直线移动（不依赖 pathfinder） */
 async function walkToFlat(bot, pos, timeoutMs = 5000, reach = REACH) {
     const targetCenter = floorPos(pos).offset(0.5, 0, 0.5)
@@ -202,17 +264,14 @@ async function walkToFlat(bot, pos, timeoutMs = 5000, reach = REACH) {
             const dist = bot.entity.position.distanceTo(targetCenter)
             if (dist <= reach) return true
 
-            // 看向目标，保持平视避免上下看
             const lookTarget = targetCenter.offset(0, 0.5, 0)
             await bot.lookAt(lookTarget, true).catch(() => {})
 
             if (Math.abs(dist - lastDist) < 0.05) {
                 stuckCount++
                 if (stuckCount > 8) throw new Error('stuck')
-                if (stuckCount > 2) {
-                    bot.setControlState('jump', true)
-                    await sleep(150)
-                    bot.setControlState('jump', false)
+                if (stuckCount >= 4 && hasBlockAhead(bot)) {
+                    if (safeJump(bot)) await sleep(100)
                 }
             } else {
                 stuckCount = 0

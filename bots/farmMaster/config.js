@@ -12,10 +12,13 @@ const serverConfig = {}
 const masterData = {
     pos1: null,
     pos2: null,
+    waypoints: [],
     workArea: null,
+    plantArea: null,
     seeds: [],
-    harvestWaitSeconds: 60,
+    harvestWaitSeconds: 20,
     maturityThreshold: 95,
+    coverageThreshold: 90,
 
     farmingAreas: new Map(),
     validCropBlocks: ['wheat', 'carrots', 'potatoes', 'beetroots'],
@@ -38,20 +41,31 @@ function loadConfig() {
             }
             if (data.pos1) masterData.pos1 = data.pos1
             if (data.pos2) masterData.pos2 = data.pos2
+            if (Array.isArray(data.waypoints)) masterData.waypoints = data.waypoints
             if (data.workArea) masterData.workArea = data.workArea
+            if (data.plantArea) masterData.plantArea = data.plantArea
             if (Array.isArray(data.seeds) && data.seeds.length > 0) masterData.seeds = data.seeds
             if (data.harvestWaitSeconds != null) masterData.harvestWaitSeconds = data.harvestWaitSeconds
             if (data.maturityThreshold != null) masterData.maturityThreshold = data.maturityThreshold
+            if (data.coverageThreshold != null) masterData.coverageThreshold = data.coverageThreshold
 
             console.log(`[配置] 服务器: ${serverConfig.host}:${serverConfig.port} 账号: ${serverConfig.username}`)
             console.log(`[配置] pos1: (${masterData.pos1?.x},${masterData.pos1?.y},${masterData.pos1?.z})`)
             console.log(`[配置] pos2: (${masterData.pos2?.x},${masterData.pos2?.y},${masterData.pos2?.z})`)
+            if (masterData.waypoints.length > 0) {
+                console.log(`[配置] 路径点: ${masterData.waypoints.length} 个`)
+            }
             if (masterData.workArea) {
                 const wa = masterData.workArea
                 console.log(`[配置] 工作区域: X(${wa.minX}~${wa.maxX}) Z(${wa.minZ}~${wa.maxZ})`)
             }
+            if (masterData.plantArea) {
+                const pa = masterData.plantArea
+                const yRange = pa.minY != null && pa.maxY != null ? ` Y(${pa.minY}~${pa.maxY})` : ''
+                console.log(`[配置] 播种区域: X(${pa.minX}~${pa.maxX})${yRange} Z(${pa.minZ}~${pa.maxZ})`)
+            }
             console.log(`[配置] 种子: ${masterData.seeds.map(s => `${s.name}(${s.ratio})`).join(', ')}`)
-            console.log(`[配置] 收割等待: ${masterData.harvestWaitSeconds}s, 成熟阈值: ${masterData.maturityThreshold}%`)
+            console.log(`[配置] 收割等待: ${masterData.harvestWaitSeconds}s, 成熟阈值: ${masterData.maturityThreshold}%, 覆盖率阈值: ${masterData.coverageThreshold}%`)
         } else {
             console.log('[配置] 未找到配置文件，使用默认值')
         }
@@ -66,10 +80,13 @@ function saveConfig() {
             server: serverConfig,
             pos1: masterData.pos1,
             pos2: masterData.pos2,
+            waypoints: masterData.waypoints,
             workArea: masterData.workArea,
+            plantArea: masterData.plantArea,
             seeds: masterData.seeds,
             harvestWaitSeconds: masterData.harvestWaitSeconds,
-            maturityThreshold: masterData.maturityThreshold
+            maturityThreshold: masterData.maturityThreshold,
+            coverageThreshold: masterData.coverageThreshold
         }
         fs.writeFileSync(configPath, JSON.stringify(data, null, 4))
         console.log('[配置] 已保存')
@@ -84,4 +101,14 @@ function isInWorkArea(pos) {
     return pos.x >= minX && pos.x <= maxX && pos.z >= minZ && pos.z <= maxZ
 }
 
-module.exports = { serverConfig, masterData, loadConfig, saveConfig, isInWorkArea }
+function isInPlantArea(pos) {
+    if (!masterData.plantArea) return isInWorkArea(pos)
+    const { minX, maxX, minY, maxY, minZ, maxZ } = masterData.plantArea
+    const inXZ = pos.x >= minX && pos.x <= maxX && pos.z >= minZ && pos.z <= maxZ
+    if (minY != null && maxY != null) {
+        return inXZ && pos.y >= minY && pos.y <= maxY
+    }
+    return inXZ
+}
+
+module.exports = { serverConfig, masterData, loadConfig, saveConfig, isInWorkArea, isInPlantArea }

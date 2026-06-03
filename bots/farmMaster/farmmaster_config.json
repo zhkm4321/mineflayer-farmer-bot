@@ -17,8 +17,8 @@
         "auth": "offline"
     },
     "pos1": {
-        "x": 1025,
-        "y": 69,
+        "x": 1026,
+        "y": 70,
         "z": 599
     },
     "pos2": {
@@ -26,11 +26,31 @@
         "y": 60,
         "z": 598
     },
+    "waypoints": [
+        {
+            "x": 1029,
+            "y": 60,
+            "z": 601
+        },
+        {
+            "x": 1025,
+            "y": 70,
+            "z": 598
+        }
+    ],
     "workArea": {
         "minX": 1009,
         "maxX": 1029,
         "minZ": 569,
         "maxZ": 604
+    },
+    "plantArea": {
+        "minX": 1010,
+        "maxX": 1026,
+        "minY": 68,
+        "maxY": 72,
+        "minZ": 571,
+        "maxZ": 598
     },
     "seeds": [
         {
@@ -51,5 +71,6 @@
         }
     ],
     "harvestWaitSeconds": 60,
-    "maturityThreshold": 95
+    "maturityThreshold": 95,
+    "coverageThreshold": 90
 }
