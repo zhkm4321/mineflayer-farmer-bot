@@ -22,7 +22,8 @@ class BehaviorGoTo {
         this.stateName = `goto_${label}`
         this.active = false
         this.x = 400
-        this.y = label.includes('1') ? 150 : 350
+        // 可视化节点坐标：显式传入优先，否则按是否反向走路径点区分
+        this.y = options.y ?? (this.reverseWaypoints ? 350 : 150)
         this.isFinished = false
         this.startTime = 0
     }

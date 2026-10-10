@@ -18,6 +18,8 @@ class BehaviorEat {
     onStateEntered() {
         this.isFinished = false
         this.startTime = Date.now()
+        // 占用进食锁：index.js 的 health 兜底 forceEat 看到 isEating=true 就不会并发 consume
+        this.masterData.isEating = true
         this.masterData.detailStatus = '进食中'
         this.runEat()
     }

@@ -83,8 +83,11 @@ function handleStatus(bot, username, reply) {
     const d = masterData
     let msg = `状态: ${d.isAutoFarming ? '运行中' : '空闲'}`
     if (d.detailStatus) msg += ` (${d.detailStatus})`
-    msg += ` | 循环: ${d.cycleCount}`
+    msg += ` | 收割轮次: ${d.harvestRound || 0}`
+    msg += ` | 播种周期: ${d.cycleCount}`
     msg += ` | 食物: ${bot.food}/20`
+    if (d.plantProtocolBlacklist?.size > 0) msg += ` | 协议黑名单: ${d.plantProtocolBlacklist.size}`
+    if (d.leverFailStreak > 0) msg += ` | 拉杆连续失败: ${d.leverFailStreak}`
 
     if (d.pos1) msg += ` | pos1: (${d.pos1.x},${d.pos1.y},${d.pos1.z})`
     if (d.pos2) msg += ` | pos2: (${d.pos2.x},${d.pos2.y},${d.pos2.z})`

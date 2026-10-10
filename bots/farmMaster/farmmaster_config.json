@@ -1,9 +1,9 @@
 {
     "server": {
-        "host": "localhost",
+        "host": "100.64.0.1",
         "port": 22224,
         "username": "FarmMaster",
-        "version": "1.21.11",
+        "version": "26.1",
         "plugins": {},
         "hideErrors": false,
         "logErrors": true,
@@ -12,9 +12,9 @@
         "brand": "vanilla",
         "respawn": true,
         "validateChannelProtocol": false,
-        "majorVersion": "1.21",
-        "protocolVersion": 774,
-        "auth": "offline"
+        "auth": "offline",
+        "majorVersion": "26.1",
+        "protocolVersion": 775
     },
     "pos1": {
         "x": 1026,

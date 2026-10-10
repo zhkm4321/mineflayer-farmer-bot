@@ -5,6 +5,13 @@ const { pathfinderGoto, stopMovement, sleep } = require('../../../utils/movement
 const NIGHT_START = 12542
 const NIGHT_END = 23460
 
+// 睡觉失败后的冷却时间：避免夜晚"进 waitMaturity → sleep 失败 → 立刻重进"的无退避抖动
+const RETRY_COOLDOWN_MS = 30000
+// 兜底上限：仅用于 bot.sleep() 永不 resolve 的异常场景，必须远大于一夜(约420s)
+const MAX_SLEEP_MS = 20 * 60 * 1000
+// 天已亮但仍标记在睡觉时，确认若干秒后主动起床
+const WAKE_AFTER_DAWN_MS = 5000
+
 class BehaviorSleep {
     constructor(bot, masterData) {
         this.bot = bot
@@ -15,6 +22,7 @@ class BehaviorSleep {
         this.y = 400
         this.isFinished = false
         this.startTime = 0
+        this.slept = false
     }
 
     static isNight(bot) {
@@ -23,8 +31,22 @@ class BehaviorSleep {
         return time >= NIGHT_START && time <= NIGHT_END
     }
 
+    /** 是否应当尝试睡觉：夜晚 + 未在睡 + 未停止 + 不在失败冷却期 */
+    static shouldSleep(bot, masterData) {
+        if (!masterData || masterData.stopRequested) return false
+        if (bot.isSleeping) return false
+        if (Date.now() < (masterData.sleepFailedUntil || 0)) return false
+        return BehaviorSleep.isNight(bot)
+    }
+
+    _noteFailure(reason) {
+        this.masterData.sleepFailedUntil = Date.now() + RETRY_COOLDOWN_MS
+        console.log(`[睡觉] ${reason}，${RETRY_COOLDOWN_MS / 1000}s 内不再尝试`)
+    }
+
     onStateEntered() {
         this.isFinished = false
+        this.slept = false
         this.startTime = Date.now()
         this.masterData.detailStatus = '准备睡觉'
         this.run()
@@ -66,7 +88,7 @@ class BehaviorSleep {
 
             const bedBlock = this._findBed()
             if (!bedBlock) {
-                console.log('[睡觉] pos2 附近未找到床')
+                this._noteFailure('pos2 附近未找到床')
                 this.isFinished = true
                 return
             }
@@ -81,7 +103,7 @@ class BehaviorSleep {
 
             const bed = this.bot.blockAt(bedPos)
             if (!bed) {
-                console.log('[睡觉] 床方块丢失')
+                this._noteFailure('床方块丢失')
                 this.isFinished = true
                 return
             }
@@ -89,30 +111,43 @@ class BehaviorSleep {
             this.masterData.detailStatus = '睡觉中'
             console.log('[睡觉] 上床睡觉')
             await this.bot.sleep(bed)
+            this.slept = true
+            this.masterData.sleepFailedUntil = 0
             console.log(`[睡觉] 天亮了，起床! 时间: ${this.bot.time.timeOfDay}`)
         } catch (e) {
             const msg = e.message || String(e)
             if (msg.includes('wake')) {
                 console.log('[睡觉] 已醒来')
+                this.masterData.sleepFailedUntil = 0
             } else {
-                console.log(`[睡觉] 失败: ${msg}`)
+                this._noteFailure(`失败: ${msg}`)
             }
         }
         this.isFinished = true
     }
 
     update() {
-        if (Date.now() - this.startTime > 120000) {
-            if (this.bot.isSleeping) {
-                try { this.bot.wake() } catch {}
-            }
+        if (!this.bot.isSleeping) return
+
+        const elapsed = Date.now() - this.startTime
+
+        if (elapsed > MAX_SLEEP_MS) {
+            console.log('[睡觉] 超过兜底上限，强制起床')
+            try { this.bot.wake() } catch (e) { /* ignore */ }
+            this.isFinished = true
+            return
+        }
+
+        if (elapsed > WAKE_AFTER_DAWN_MS && !BehaviorSleep.isNight(this.bot)) {
+            console.log('[睡觉] 天已亮，主动起床')
+            try { this.bot.wake() } catch (e) { /* ignore */ }
             this.isFinished = true
         }
     }
 
     onStateExited() {
         if (this.bot.isSleeping) {
-            try { this.bot.wake() } catch {}
+            try { this.bot.wake() } catch (e) { /* ignore */ }
         }
         stopMovement(this.bot)
         this.masterData.detailStatus = ''

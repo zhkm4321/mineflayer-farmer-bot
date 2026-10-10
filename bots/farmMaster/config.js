@@ -6,6 +6,8 @@ const { LRUMap } = require('../../utils/lruMap')
 const configPath = path.join(__dirname, 'farmmaster_config.json')
 
 const PLANT_BLACKLIST_MAX_SIZE = 100
+const PLANT_BLACKLIST_TTL_MS = 30 * 60 * 1000
+const PLANT_BLACKLIST_SCAN_MS = 30 * 60 * 1000
 
 const serverConfig = {}
 
@@ -16,9 +18,17 @@ const masterData = {
     workArea: null,
     plantArea: null,
     seeds: [],
-    harvestWaitSeconds: 20,
+
+    // 收割等待：由 BehaviorWaitHarvest 闭环驱动，harvestWaitSeconds 仅作为上限
+    harvestWaitSeconds: 60,
+    harvestWaitMinSeconds: 8,
+    harvestDoneRatio: 5,
+
     maturityThreshold: 95,
     coverageThreshold: 90,
+    scanIntervalMs: 30000,
+    plantMsPerPlot: 1200,
+    plantMaxTimeMs: 1800000,
 
     farmingAreas: new Map(),
     validCropBlocks: ['wheat', 'carrots', 'potatoes', 'beetroots'],
@@ -30,6 +40,12 @@ const masterData = {
     isEating: false,
     isShuttingDown: false,
     cycleCount: 0,
+
+    // 运行时协调状态（不持久化）
+    sleepFailedUntil: 0,
+    leverFailStreak: 0,
+    lastLeverError: null,
+    harvestRound: 0,
 }
 
 function loadConfig() {
@@ -46,8 +62,13 @@ function loadConfig() {
             if (data.plantArea) masterData.plantArea = data.plantArea
             if (Array.isArray(data.seeds) && data.seeds.length > 0) masterData.seeds = data.seeds
             if (data.harvestWaitSeconds != null) masterData.harvestWaitSeconds = data.harvestWaitSeconds
+            if (data.harvestWaitMinSeconds != null) masterData.harvestWaitMinSeconds = data.harvestWaitMinSeconds
+            if (data.harvestDoneRatio != null) masterData.harvestDoneRatio = data.harvestDoneRatio
             if (data.maturityThreshold != null) masterData.maturityThreshold = data.maturityThreshold
             if (data.coverageThreshold != null) masterData.coverageThreshold = data.coverageThreshold
+            if (data.scanIntervalMs != null) masterData.scanIntervalMs = data.scanIntervalMs
+            if (data.plantMsPerPlot != null) masterData.plantMsPerPlot = data.plantMsPerPlot
+            if (data.plantMaxTimeMs != null) masterData.plantMaxTimeMs = data.plantMaxTimeMs
 
             console.log(`[配置] 服务器: ${serverConfig.host}:${serverConfig.port} 账号: ${serverConfig.username}`)
             console.log(`[配置] pos1: (${masterData.pos1?.x},${masterData.pos1?.y},${masterData.pos1?.z})`)
@@ -65,7 +86,8 @@ function loadConfig() {
                 console.log(`[配置] 播种区域: X(${pa.minX}~${pa.maxX})${yRange} Z(${pa.minZ}~${pa.maxZ})`)
             }
             console.log(`[配置] 种子: ${masterData.seeds.map(s => `${s.name}(${s.ratio})`).join(', ')}`)
-            console.log(`[配置] 收割等待: ${masterData.harvestWaitSeconds}s, 成熟阈值: ${masterData.maturityThreshold}%, 覆盖率阈值: ${masterData.coverageThreshold}%`)
+            console.log(`[配置] 收割等待: 上限${masterData.harvestWaitSeconds}s / 最少${masterData.harvestWaitMinSeconds}s, 完成阈值: 成熟占比<=${masterData.harvestDoneRatio}%`)
+            console.log(`[配置] 成熟阈值: ${masterData.maturityThreshold}%, 覆盖率阈值: ${masterData.coverageThreshold}%`)
         } else {
             console.log('[配置] 未找到配置文件，使用默认值')
         }
@@ -85,8 +107,13 @@ function saveConfig() {
             plantArea: masterData.plantArea,
             seeds: masterData.seeds,
             harvestWaitSeconds: masterData.harvestWaitSeconds,
+            harvestWaitMinSeconds: masterData.harvestWaitMinSeconds,
+            harvestDoneRatio: masterData.harvestDoneRatio,
             maturityThreshold: masterData.maturityThreshold,
-            coverageThreshold: masterData.coverageThreshold
+            coverageThreshold: masterData.coverageThreshold,
+            scanIntervalMs: masterData.scanIntervalMs,
+            plantMsPerPlot: masterData.plantMsPerPlot,
+            plantMaxTimeMs: masterData.plantMaxTimeMs
         }
         fs.writeFileSync(configPath, JSON.stringify(data, null, 4))
         console.log('[配置] 已保存')
@@ -111,4 +138,24 @@ function isInPlantArea(pos) {
     return inXZ
 }
 
-module.exports = { serverConfig, masterData, loadConfig, saveConfig, isInWorkArea, isInPlantArea }
+// LRU 已有容量上限，这里按时间维度清理过期的种植协议黑名单
+const plantBlacklistCleanupInterval = setInterval(() => {
+    const removed = masterData.plantProtocolBlacklist.purgeOlderThan(PLANT_BLACKLIST_TTL_MS)
+    if (removed > 0) {
+        console.log(`[种植黑名单] 清理 ${removed} 个过期地块，剩余 ${masterData.plantProtocolBlacklist.size}`)
+    }
+}, PLANT_BLACKLIST_SCAN_MS)
+
+function stopBackgroundTasks() {
+    clearInterval(plantBlacklistCleanupInterval)
+}
+
+module.exports = {
+    serverConfig,
+    masterData,
+    loadConfig,
+    saveConfig,
+    isInWorkArea,
+    isInPlantArea,
+    stopBackgroundTasks
+}

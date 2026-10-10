@@ -10,12 +10,12 @@ const {
 } = require('mineflayer-statemachine')
 const { ClosableWebserver } = require('../../utils/closableWebserver')
 
-const { serverConfig, masterData, loadConfig, saveConfig } = require('./config')
+const { serverConfig, masterData, loadConfig, saveConfig, stopBackgroundTasks } = require('./config')
 const { registerCommands } = require('./commands')
 const { BehaviorCheckHunger } = require('./behaviors/BehaviorCheckHunger')
 const { BehaviorEat } = require('./behaviors/BehaviorEat')
 const { BehaviorOperateLever } = require('./behaviors/BehaviorOperateLever')
-const { BehaviorWait } = require('./behaviors/BehaviorWait')
+const { BehaviorWaitHarvest } = require('./behaviors/BehaviorWaitHarvest')
 const { BehaviorGetSeeds } = require('./behaviors/BehaviorGetSeeds')
 const { BehaviorGoTo } = require('./behaviors/BehaviorGoTo')
 const { BehaviorPlantSeeds } = require('./behaviors/BehaviorPlantSeeds')
@@ -59,6 +59,8 @@ function createBot() {
         setupStateMachine()
         registerCommands(bot, startFarming, stopFarming)
 
+        // 兜底进食：只有在没有正在进行的进食/BedEat 流程时才介入，
+        // 否则会和 BehaviorEat 并发 equip/consume 冲突（isEating 由 BehaviorEat 持有）
         bot.on('health', () => {
             if (bot.food <= 6 && !masterData.isEating) {
                 console.log(`[警告] 食物值过低: ${bot.food}/20，强制进食`)
@@ -113,26 +115,57 @@ function setupStateMachine() {
     const checkHunger = new BehaviorCheckHunger(bot, masterData)
     const eat = new BehaviorEat(bot, masterData)
     const activateLever = new BehaviorOperateLever(bot, masterData, 'on')
-    const waitHarvest = new BehaviorWait(bot, masterData, () => masterData.harvestWaitSeconds, '收割等待')
+    const waitHarvest = new BehaviorWaitHarvest(bot, masterData)
     const deactivateLever = new BehaviorOperateLever(bot, masterData, 'off')
     const getSeeds = new BehaviorGetSeeds(bot, masterData)
     const getWaypoints = () => masterData.waypoints
     const gotoPos1 = new BehaviorGoTo(bot, masterData, () => masterData.pos1, '前往播种区', {
-        getWaypoints, reverseWaypoints: false
+        getWaypoints, reverseWaypoints: false, y: 150
     })
     const plantSeeds = new BehaviorPlantSeeds(bot, masterData)
     const gotoPos2 = new BehaviorGoTo(bot, masterData, () => masterData.pos2, '前往拉杆区', {
-        getWaypoints, reverseWaypoints: true
+        getWaypoints, reverseWaypoints: true, y: 350
     })
     const waitMaturity = new BehaviorWaitMaturity(bot, masterData)
     const sleepBehavior = new BehaviorSleep(bot, masterData)
 
-    // 状态机流程：
-    // 夜晚检测：WaitMaturity/WaitHarvest/Idle → Sleep → WaitMaturity
+    // 状态机转移按数组顺序匹配，靠前者优先，因此显式分三段拼接：
+    //   [1] stop  : 任意工作状态 → idle（最高优先级，保证 stop 一定生效）
+    //   [2] sleep : WaitMaturity/Idle → Sleep → WaitMaturity
+    //   [3] flow  : 正常工作流
+    // 注意 sleep 不覆盖 waitHarvest —— 收割等待中途去睡觉会把拉杆留在开启状态。
+    //
+    // 工作流：
     // Idle → WaitMaturity → CheckHunger（必经）→ Eat?
-    //   ├─ 需要收割 → ActivateLever(开) → Wait → DeactivateLever(关) → GetSeeds → GoTo(pos1) → Plant → GoTo(pos2) → WaitMaturity
+    //   ├─ 需要收割 → ActivateLever(开) → WaitHarvest(闭环) → DeactivateLever(关) → GetSeeds → GoTo(pos1) → Plant → GoTo(pos2) → WaitMaturity
     //   └─ 需要播种 → GetSeeds → GoTo(pos1) → PlantSeeds → GoTo(pos2) → WaitMaturity
-    const transitions = [
+
+    // ---- [1] 停止（最高优先级）----
+    const stopTargets = [
+        waitMaturity, checkHunger, eat, activateLever, waitHarvest,
+        deactivateLever, getSeeds, gotoPos1, plantSeeds, gotoPos2, sleepBehavior
+    ]
+    const stopTransitions = stopTargets.map(state =>
+        new StateTransition({
+            parent: state,
+            child: idle,
+            name: 'stop',
+            shouldTransition: () => masterData.stopRequested
+        })
+    )
+
+    // ---- [2] 夜晚睡觉（受 stop 与失败冷却约束）----
+    const sleepTransitions = [waitMaturity, idle].map(state =>
+        new StateTransition({
+            parent: state,
+            child: sleepBehavior,
+            name: 'sleep',
+            shouldTransition: () => BehaviorSleep.shouldSleep(bot, masterData)
+        })
+    )
+
+    // ---- [3] 正常工作流 ----
+    const flowTransitions = [
         // Idle -> WaitMaturity
         new StateTransition({
             parent: idle,
@@ -179,11 +212,17 @@ function setupStateMachine() {
             shouldTransition: () => eat.isFinished && !masterData._needsHarvest
         }),
 
-        // ActivateLever -> WaitHarvest
+        // ActivateLever 成功 -> WaitHarvest
         new StateTransition({
             parent: activateLever,
             child: waitHarvest,
-            shouldTransition: () => activateLever.isFinished
+            shouldTransition: () => activateLever.isFinished && activateLever.succeeded
+        }),
+        // ActivateLever 失败 -> WaitMaturity（本轮不收割，下轮重试）
+        new StateTransition({
+            parent: activateLever,
+            child: waitMaturity,
+            shouldTransition: () => activateLever.isFinished && !activateLever.succeeded
         }),
 
         // WaitHarvest -> DeactivateLever
@@ -193,11 +232,17 @@ function setupStateMachine() {
             shouldTransition: () => waitHarvest.isFinished
         }),
 
-        // DeactivateLever -> GetSeeds
+        // DeactivateLever 成功 -> GetSeeds
         new StateTransition({
             parent: deactivateLever,
             child: getSeeds,
-            shouldTransition: () => deactivateLever.isFinished
+            shouldTransition: () => deactivateLever.isFinished && deactivateLever.succeeded
+        }),
+        // DeactivateLever 失败 -> WaitMaturity（拉杆可能仍开启，禁止此时播种）
+        new StateTransition({
+            parent: deactivateLever,
+            child: waitMaturity,
+            shouldTransition: () => deactivateLever.isFinished && !deactivateLever.succeeded
         }),
 
         // GetSeeds -> Idle（锄头不足时等待）
@@ -235,36 +280,15 @@ function setupStateMachine() {
             shouldTransition: () => gotoPos2.isFinished
         }),
 
-        // 夜晚睡觉：等待/空闲状态 -> Sleep
-        ...[waitMaturity, waitHarvest, idle].map(state =>
-            new StateTransition({
-                parent: state,
-                child: sleepBehavior,
-                name: 'sleep',
-                shouldTransition: () => BehaviorSleep.isNight(bot) && !bot.isSleeping
-            })
-        ),
-
         // Sleep -> WaitMaturity（醒来后继续工作）
         new StateTransition({
             parent: sleepBehavior,
             child: waitMaturity,
             shouldTransition: () => sleepBehavior.isFinished
         }),
-
-        // Stop: 任何状态 -> Idle
-        ...[waitMaturity, checkHunger, eat, activateLever, waitHarvest,
-            deactivateLever, getSeeds, gotoPos1, plantSeeds, gotoPos2,
-            sleepBehavior
-        ].map(state =>
-            new StateTransition({
-                parent: state,
-                child: idle,
-                name: 'stop',
-                shouldTransition: () => masterData.stopRequested
-            })
-        ),
     ]
+
+    const transitions = [...stopTransitions, ...sleepTransitions, ...flowTransitions]
 
     const rootLayer = new NestedStateMachine(transitions, idle)
     rootLayer.stateName = 'farmMaster'
@@ -281,7 +305,7 @@ function setupStateMachine() {
         console.log('[Web] 启动失败:', e.message)
     }
 
-    console.log('[状态机] FarmMaster 已初始化，10 个状态')
+    console.log('[状态机] FarmMaster 已初始化，12 个状态')
 }
 
 function startFarming() {
@@ -299,6 +323,16 @@ function handleDisconnect() {
     if (isShuttingDown || isReconnecting) return
     isReconnecting = true
     stateMachine = null
+
+    // 关闭旧的 Web 可视化：它持有旧 bot / stateMachine 的引用，
+    // 重连后不会自动切换（页面永远停在旧状态机），而且会一直占着端口
+    if (webserver) {
+        const ws = webserver
+        webserver = null
+        try {
+            if (ws.isServerRunning()) ws.stopServer().catch(() => {})
+        } catch (e) { /* ignore */ }
+    }
 
     if (reconnectConfig.attempts >= reconnectConfig.maxAttempts) {
         console.log('达到最大重连次数，停止重连')
@@ -333,7 +367,7 @@ async function shutdown(signal = 'SIGINT') {
         bot.removeAllListeners('physicTick')
     }
     stateMachine = null
-    if (bot?.pathfinder) { try { bot.pathfinder.setGoal(null) } catch {} }
+    if (bot?.pathfinder) { try { bot.pathfinder.setGoal(null) } catch (e) { /* ignore */ } }
 
     logStep('2/4', '取消自动重连...')
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
@@ -342,12 +376,13 @@ async function shutdown(signal = 'SIGINT') {
     if (bot) {
         bot.removeAllListeners('end')
         bot.removeAllListeners('kicked')
-        try { bot.quit('FarmMaster 已下线') } catch { try { bot.end() } catch {} }
+        try { bot.quit('FarmMaster 已下线') } catch (e) { try { bot.end() } catch (e2) { /* ignore */ } }
     }
 
     logStep('4/4', '关闭 Web 服务并保存配置...')
+    stopBackgroundTasks()
     if (webserver?.isServerRunning()) {
-        try { await webserver.stopServer() } catch {}
+        try { await webserver.stopServer() } catch (e) { /* ignore */ }
     }
     saveConfig()
 

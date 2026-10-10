@@ -19,10 +19,12 @@ class BehaviorOperateLever {
         this.isFinished = false
         this.startTime = 0
         this.maxRetries = 5
+        this.succeeded = false
     }
 
     onStateEntered() {
         this.isFinished = false
+        this.succeeded = false
         this.startTime = Date.now()
         this.masterData.detailStatus = this.mode === 'on' ? '开启拉杆' : '关闭拉杆'
         this.run()
@@ -118,7 +120,8 @@ class BehaviorOperateLever {
 
         const pos2 = this.masterData.pos2
         if (!pos2) {
-            console.log(`[拉杆] pos2 未配置`)
+            console.log('[拉杆] pos2 未配置')
+            this.succeeded = false
             this.isFinished = true
             return
         }
@@ -130,11 +133,15 @@ class BehaviorOperateLever {
                 const ok = await this._tryOnce()
                 if (ok) {
                     console.log(`[拉杆] ${label}成功`)
+                    this.succeeded = true
+                    this.masterData.leverFailStreak = 0
+                    this.masterData.lastLeverError = null
                     this.isFinished = true
                     return
                 }
             } catch (e) {
                 console.log(`[拉杆] ${label}失败(${attempt}/${this.maxRetries}): ${e.message}`)
+                this.masterData.lastLeverError = e.message
             }
 
             if (attempt < this.maxRetries) {
@@ -144,7 +151,20 @@ class BehaviorOperateLever {
             }
         }
 
-        console.log(`[拉杆] 达到最大重试次数，跳过`)
+        console.log(`[拉杆] ${label}达到最大重试次数，本次失败`)
+        this.succeeded = false
+        this.masterData.leverFailStreak = (this.masterData.leverFailStreak || 0) + 1
+
+        // 关闭失败说明红石农场可能仍在运行，此时播种会被冲毁 → 暂停自动循环并告警
+        if (this.mode === 'off' && this.masterData.leverFailStreak >= 3) {
+            console.log('[拉杆][告警] 连续 3 次无法关闭拉杆，已暂停自动循环，请人工检查')
+            this.masterData.isAutoFarming = false
+            this.masterData.stopRequested = true
+            try {
+                this.bot.chat('FarmMaster 告警: 拉杆关闭连续失败，已暂停自动循环')
+            } catch (e) { /* ignore */ }
+        }
+
         this.isFinished = true
     }
 
