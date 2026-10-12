@@ -85,6 +85,11 @@ class BehaviorNightIdle {
     }
 
     update() {
+        // 【防重入】isFinished 置位后，状态机要等下一次 update 周期才执行转移，
+        // 期间本函数每 tick 仍会被调用。没有这个闸门就会每 50ms 刷一次日志
+        // （实测：天亮瞬间刷了几十行"天亮了，继续干活"）。
+        if (this.isFinished) return
+
         // 天亮即结束（发呆点站桩）
         if (this.movedToSpot && !BehaviorNightIdle.isNight(this.bot)) {
             console.log(`[发呆] 天亮了，继续干活 (时间: ${this.bot.time?.timeOfDay ?? '?'})`)

@@ -161,6 +161,8 @@ class BehaviorOperateLever {
     }
 
     update() {
+        // 【防重入】置位后到转移前 update 仍会被反复调用
+        if (this.isFinished) return
         if (Date.now() - this.startTime > 90000) this.isFinished = true
     }
 

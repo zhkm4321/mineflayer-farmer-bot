@@ -333,6 +333,8 @@ class BehaviorGetSupplies {
     }
 
     update() {
+        // 【防重入】同上：置位后到转移前 update 仍会被反复调用，没闸门就会刷屏
+        if (this.isFinished) return
         if (Date.now() - this.startTime > 300000) {
             console.log('[补给] 超时，放弃本轮')
             stopMovement(this.bot)

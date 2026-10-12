@@ -109,6 +109,8 @@ class BehaviorEat {
     }
 
     update() {
+        // 【防重入】置位后到转移前 update 仍会被反复调用
+        if (this.isFinished) return
         // 兜底窗口：找容器 + 进食可能要几分钟，30s 会把进食拦腰打断
         if (Date.now() - this.startTime > 300000) {
             this.isFinished = true

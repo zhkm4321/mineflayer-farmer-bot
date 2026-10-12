@@ -155,6 +155,8 @@ class BehaviorGoTo {
     }
 
     update() {
+        // 【防重入】isFinished 置位后要等下一 tick 才转移，期间 update 仍会被调用
+        if (this.isFinished) return
         // 总时长上限（60s/路径点 + 终点 60s + 富余）
         if (Date.now() - this.startTime > (this.waypointsGetter().length + 2) * 60000) {
             console.log(`[${this.label}] 导航总时长超限，放弃`)

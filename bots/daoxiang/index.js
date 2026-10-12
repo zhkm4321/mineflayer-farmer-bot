@@ -188,6 +188,16 @@ function setupStateMachine() {
             shouldTransition: () => BehaviorNightIdle.shouldIdle(bot, masterData)
         })
     )
+    // 【必须】天亮后离开 nightIdle 的出口。少了这条转移，isFinished=true 后状态机无路可走，
+    // 会永远停在 nightIdle 里反复调用 update（实测天亮瞬间刷几十行日志）。
+    nightTransitions.push(
+        new StateTransition({
+            parent: nightIdle,
+            child: waitMaturity,
+            name: 'dawn',
+            shouldTransition: () => nightIdle.isFinished
+        })
+    )
 
     // [3] 工作流
     //   Idle → WaitMaturity → CheckHunger → Eat?

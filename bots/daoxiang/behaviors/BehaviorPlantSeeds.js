@@ -433,6 +433,8 @@ class BehaviorPlantSeeds {
     }
 
     update() {
+        // 【防重入】同上：置位后到转移前 update 仍会被反复调用，没闸门就会刷屏
+        if (this.isFinished) return
         if (Date.now() - this.startTime > this.timeBudgetMs + 30000) {
             console.log('[播种] 超时兜底触发')
             stopMovement(this.bot)
