@@ -6,6 +6,8 @@ const { sleep, stopMovement, pathfinderGoto } = require('../../../utils/movement
 const MIN_HOES = 2
 const HOE_NAME = 'stone_hoe'
 const CHEST_SEARCH_RADIUS = 6
+// 物资不足后，多久才允许再次尝试取物资（避免 waitMaturity↔getSeeds 零间隔死循环）
+const SUPPLY_RETRY_COOLDOWN_MS = 60000
 
 class BehaviorGetSeeds {
     constructor(bot, masterData) {
@@ -22,9 +24,28 @@ class BehaviorGetSeeds {
 
     onStateEntered() {
         this.isFinished = false
-        this.noHoes = false
         this.startTime = Date.now()
         this.masterData.detailStatus = '取种子和锄头'
+
+        // 重试闸门：上一次"物资不足"之后必须等一段时间才能再进本状态。
+        // 【为什么必须放在这里】index.js 里的流程是一个环路：
+        //     waitMaturity → getSeeds → waitMaturity → ...
+        // 只要 getSeeds 判定"物资不足"，这个环就会以接近零的间隔无限自转
+        // （实测 6 秒内 getSeeds 进入 21 次，日志被刷爆）。
+        // 单纯把失败目标从 idle 改成 waitMaturity 只是换了个绕法，必须在入口拦截。
+        const now = Date.now()
+        const until = this.masterData.supplyRetryAt || 0
+        if (now < until) {
+            const left = ((until - now) / 1000).toFixed(0)
+            console.log(`[取物资] 物资不足冷却中，还需 ${left}s（请在 pos2 箱子里补充锄头/种子）`)
+            this.retryBlocked = true
+            this.noHoes = true
+            this.isFinished = true
+            return
+        }
+
+        this.retryBlocked = false
+        this.noHoes = false
         this.run()
     }
 
@@ -32,6 +53,12 @@ class BehaviorGetSeeds {
         return this.bot.inventory.items()
             .filter(i => i.name === HOE_NAME)
             .reduce((sum, i) => sum + i.count, 0)
+    }
+
+    /** 记下"物资不足"的冷却截止时间，防止流程环路零间隔自转 */
+    _setSupplyCooldown() {
+        this.masterData.supplyRetryAt = Date.now() + SUPPLY_RETRY_COOLDOWN_MS
+        console.log(`[取物资] 将在 ${SUPPLY_RETRY_COOLDOWN_MS / 1000}s 后重试取物资`)
     }
 
     _countItem(name) {
@@ -137,6 +164,7 @@ class BehaviorGetSeeds {
             if (this._emptySlots() <= 0) {
                 console.log('[取物资][告警] 背包已满，无法取种子/锄头，跳过（请清理背包）')
                 this.noHoes = needHoes
+                this._setSupplyCooldown()
                 this.isFinished = true
                 return
             }
@@ -167,6 +195,9 @@ class BehaviorGetSeeds {
                 if (needHoes) {
                     this.noHoes = true
                 }
+                // 这条路径也必须设冷却。漏掉它曾导致：noHoes=true → 回 waitMaturity →
+                // 立刻又进 getSeeds → 又没箱子 → ... 6 秒内刷 21 轮（实测）。
+                this._setSupplyCooldown()
                 this.isFinished = true
                 return
             }
@@ -231,9 +262,22 @@ class BehaviorGetSeeds {
             }
 
             const finalHoes = this._countHoes()
+
+            // 重新核对种子：盒子里可能根本不够，取完仍不足会让播种立刻空转，
+            // 这里先量化出来（不阻塞流程，只报告缺口）
+            const stillShort = targets.filter(t => this._countItem(t.name) < t.target)
+            if (stillShort.length > 0) {
+                console.log(`[取物资] 种子仍不足: ${stillShort.map(t => `${t.name}(有${this._countItem(t.name)}/需${t.target})`).join(', ')}`)
+            }
+
+            // 关键：得出"锄头不足"的结论必须走 console.log 之外的显式标志，
+            // 否则调用方会以为物资齐备、直接去播种，然后一株都种不了
             if (finalHoes < MIN_HOES) {
-                console.log(`[取物资] 锄头仍不足(${finalHoes}/${MIN_HOES})，进入等待状态`)
+                const hitTimeLimit = Date.now() - this.startTime > 45000
+                console.log(`[取物资] 锄头仍不足(${finalHoes}/${MIN_HOES})，跳过本轮播种` +
+                    (hitTimeLimit ? '（已达时间上限）' : ''))
                 this.noHoes = true
+                this._setSupplyCooldown()
                 this.isFinished = true
                 return
             }

@@ -1,0 +1,63 @@
+{
+    "server": {
+        "host": "localhost",
+        "port": 22224,
+        "username": "DaoXiang",
+        "version": "26.1",
+        "majorVersion": "26.1",
+        "protocolVersion": 775,
+        "auth": "offline",
+        "respawn": true
+    },
+    "lever": { "x": 1027, "y": 70, "z": 570 },
+    "barrels": { "x": 1028, "y": 70, "zMin": 571, "zMax": 577 },
+    "nightSpot": { "x": 1033, "y": 61, "z": 598 },
+    "terraces": [
+        { "minX": 1017, "maxX": 1024, "minZ": 571, "maxZ": 598, "y": 69 },
+        { "minX": 1010, "maxX": 1016, "minZ": 571, "maxZ": 598, "y": 70 }
+    ],
+    "unplantable": [
+        { "x": 1013, "y": 70, "z": 574 },
+        { "x": 1013, "y": 70, "z": 581 },
+        { "x": 1013, "y": 70, "z": 588 },
+        { "x": 1013, "y": 70, "z": 595 },
+        { "x": 1020, "y": 70, "z": 574 },
+        { "x": 1020, "y": 70, "z": 581 },
+        { "x": 1020, "y": 70, "z": 588 },
+        { "x": 1020, "y": 69, "z": 595 }
+    ],
+    "seeds": [
+        { "name": "potato", "ratio": 1 },
+        { "name": "carrot", "ratio": 1 },
+        { "name": "wheat_seeds", "ratio": 5 },
+        { "name": "beetroot_seeds", "ratio": 1 }
+    ],
+    "tools": {
+        "hoeItem": "stone_hoe",
+        "minHoes": 2
+    },
+    "food": {
+        "breadItem": "bread",
+        "triggerPercent": 30
+    },
+    "containerSearch": {
+        "radius": 24
+    },
+    "harvest": {
+        "maturityThreshold": 95,
+        "waitMaxSeconds": 60,
+        "waitMinSeconds": 10,
+        "doneRatio": 5
+    },
+    "plant": {
+        "coverageThreshold": 90,
+        "msPerPlot": 1200,
+        "maxTimeMs": 1800000
+    },
+    "scan": {
+        "intervalMs": 30000
+    },
+    "tp": { "enabled": true, "farDistance": 200 },
+    "webPort": 8936,
+    "posLogIntervalMs": 10000
+}

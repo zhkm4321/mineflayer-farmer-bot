@@ -1,6 +1,9 @@
 function isCropMature(block) {
     if (!block) return false
-    const age = block.getProperties?.()?.age ?? block.metadata
+    // 【实测】1.21.11 里 getProperties().age 返回字符串 "0"~"7"（不是数字）。
+    // 旧代码直接 `age >= 7` 靠 JS 隐式转换碰巧正确，这里显式转换以免将来翻车。
+    const raw = block.getProperties?.()?.age ?? block.metadata
+    const age = Number(raw)
     switch (block.name) {
         case 'wheat':
         case 'carrots':

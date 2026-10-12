@@ -273,6 +273,16 @@ class BehaviorPlantSeeds {
 
     async run() {
         try {
+            // 位置守卫：必须真的站在播种区才开工。否则 findBlocks(maxDistance:32) 会从
+            // 下层扫到上层农田，报出一堆"空地"，然后逐块移动失败 —— 白白烧掉几分钟，
+            // 日志看起来还像是"扫到了地但一株都种不下"。
+            const here = this.bot.entity.position
+            if (!isInPlantArea(here)) {
+                console.log(`[播种] 当前不在播种区 (${here.x.toFixed(0)},${here.y.toFixed(0)},${here.z.toFixed(0)})，放弃播种`)
+                this.isFinished = true
+                return
+            }
+
             const stats = scanFarmingAreas(this.bot, this.masterData, isInPlantArea)
             const farmlandEmpties = Array.from(this.masterData.farmingAreas.values())
                 .filter(a => a.isEmpty && !a.hasCrop && this._canPlantAt(a))
@@ -312,7 +322,12 @@ class BehaviorPlantSeeds {
                     console.log(`[播种] 达到本轮时间预算 ${Math.round(this.timeBudgetMs / 1000)}s，剩余地块下轮继续`)
                     break
                 }
-                if (this.bot.food <= 6) break
+                // 饿到会掉血就立刻停手，回去让进食状态接管（原来只 break，一株没种就退出，
+                // 而饥饿是被"播种 494s 预算"压住的，越拖越糟）
+                if (this.bot.food <= 6) {
+                    console.log(`[播种] 饥饿 ${this.bot.food}/20，中断播种先去进食`)
+                    break
+                }
                 if (giveUp.has(seedName)) continue
 
                 if (seedName !== lastSeedName) {

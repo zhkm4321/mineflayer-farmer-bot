@@ -2,9 +2,11 @@
   "name": "minecraft-farm-bot",
   "version": "1.0.0",
   "description": "Minecraft Farm Bot",
-  "main": "bots/farmMaster/index.js",
+  "main": "bots/daoxiang/index.js",
   "scripts": {
-    "start": "node bots/farmMaster/index.js",
+    "start": "node bots/daoxiang/index.js",
+    "daoxiang": "node bots/daoxiang/index.js",
+    "daoxiang:dev": "nodemon bots/daoxiang/index.js",
     "farmmaster": "node bots/farmMaster/index.js",
     "farmmaster:dev": "nodemon bots/farmMaster/index.js",
     "aiplayer": "node bots/aiplayer/index.js",

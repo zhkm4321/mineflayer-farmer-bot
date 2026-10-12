@@ -1,6 +1,6 @@
 {
     "server": {
-        "host": "100.64.0.1",
+        "host": "localhost",
         "port": 22224,
         "username": "FarmMaster",
         "version": "26.1",
@@ -71,6 +71,11 @@
         }
     ],
     "harvestWaitSeconds": 60,
+    "harvestWaitMinSeconds": 8,
+    "harvestDoneRatio": 5,
     "maturityThreshold": 95,
-    "coverageThreshold": 90
+    "coverageThreshold": 90,
+    "scanIntervalMs": 30000,
+    "plantMsPerPlot": 1200,
+    "plantMaxTimeMs": 1800000
 }

@@ -32,48 +32,75 @@ class BehaviorOperateLever {
 
     _findLever() {
         const pos2 = this.masterData.pos2
-        if (!pos2) return null
-        return this.bot.findBlock({
+        // 先以 pos2 为中心搜，找不到再放宽到自身周围。
+        // 原来只搜 pos2 半径 6，一旦寻路偏差或 pos2 配置略偏，就会在第 4、5 次重试时
+        // 报"在 pos2 附近未找到拉杆"——但前 3 次明明是找到了并操作过的（状态不一致的假象）。
+        if (pos2) {
+            const found = this.bot.findBlock({
+                matching: block => block.name === 'lever',
+                maxDistance: 6,
+                point: new Vec3(pos2.x, pos2.y, pos2.z)
+            })
+            if (found) return found
+        }
+
+        const self = this.bot.findBlock({
             matching: block => block.name === 'lever',
-            maxDistance: 6,
-            point: new Vec3(pos2.x, pos2.y, pos2.z)
+            maxDistance: 8
         })
+        if (self && pos2) {
+            console.log(`[拉杆] pos2 附近无拉杆，改用自身附近找到的 (${self.position.x},${self.position.y},${self.position.z})`)
+        }
+        return self
+    }
+
+    /** 读取拉杆 powered 状态。
+     *  【实测】prismarine-block getProperties() 对 bool 类型状态返回真正的布尔值
+     *  （lever powered: true/false），不是字符串 'true'/'false'。
+     *  旧代码写成 `=== 'true'`，永远得到 false —— 拉杆明明拨成功了却判定失败，
+     *  重试时又拨回去，来回震荡；关闭模式连续失败 3 次还会暂停整个自动循环。 */
+    _readPowered(block) {
+        return block?.getProperties?.()?.powered === true
     }
 
     /**
-     * 激活拉杆并等待服务器 blockUpdate 事件确认状态变化
+     * 激活拉杆并等待服务器确认状态变化。
+     * 用官方按坐标事件 `blockUpdate:(x, y, z)`（mineflayer blocks.js:595-600 自动转发，
+     * 官方插件 place_block.js/digging.js 均按此方式订阅），不再手动挂全局事件+过滤坐标。
      * @returns {Promise<boolean>} 操作后的 powered 状态
      */
     _activateAndWaitUpdate(lever) {
         const leverPos = lever.position
         const timeoutMs = 3000
+        const eventName = `blockUpdate:${leverPos}`
 
         return new Promise((resolve) => {
             let settled = false
             const finish = (powered) => {
                 if (settled) return
                 settled = true
-                this.bot.world.removeListener('blockUpdate', onUpdate)
                 clearTimeout(timer)
+                // 触发 once 后监听器自动移除；超时路径需手动移除
+                this.bot.removeListener(eventName, onUpdate)
                 resolve(powered)
             }
 
             const onUpdate = (oldBlock, newBlock) => {
-                if (!newBlock || !newBlock.position.equals(leverPos)) return
-                if (newBlock.name !== 'lever') return
-                const powered = newBlock.getProperties?.()?.powered === 'true'
+                // 按坐标事件只收本坐标的更新；仍校验方块类型以防异常包
+                if (!newBlock || newBlock.name !== 'lever') return
+                const powered = this._readPowered(newBlock)
                 console.log(`[拉杆] 收到 blockUpdate: powered=${powered}`)
                 finish(powered)
             }
 
             const timer = setTimeout(() => {
                 const block = this.bot.blockAt(leverPos)
-                const powered = block?.getProperties?.()?.powered === 'true'
+                const powered = this._readPowered(block)
                 console.log(`[拉杆] blockUpdate 超时(${timeoutMs}ms)，blockAt 读取 powered=${powered}`)
                 finish(powered)
             }, timeoutMs)
 
-            this.bot.world.on('blockUpdate', onUpdate)
+            this.bot.once(eventName, onUpdate)
             this.bot.activateBlock(lever).catch(() => {})
         })
     }
@@ -95,7 +122,7 @@ class BehaviorOperateLever {
         }
 
         const wantPowered = this.mode === 'on'
-        const beforePowered = lever.getProperties?.()?.powered === 'true'
+        const beforePowered = this._readPowered(lever)
         console.log(`[拉杆] 操作前 powered=${beforePowered}，目标 powered=${wantPowered}`)
 
         if (beforePowered === wantPowered) {

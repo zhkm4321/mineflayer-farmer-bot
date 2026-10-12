@@ -1,6 +1,7 @@
 require('../../utils/log').installLogTimestamp()
 
 const mineflayer = require('mineflayer')
+const { Vec3 } = require('vec3')
 const { pathfinder } = require('mineflayer-pathfinder')
 const { configureMovements, stopMovement } = require('../../utils/movement')
 const {
@@ -28,6 +29,12 @@ let bot = null
 let isReconnecting = false
 let isShuttingDown = false
 let reconnectTimer = null
+
+// eat 行为实例在 setupStateMachine 里创建；forceEat 兜底路径需要复用它去 pos2 取面包
+let eatBehavior = null
+function getEatBehavior() {
+    return eatBehavior
+}
 let stateMachine = null
 let webserver = null
 
@@ -44,6 +51,49 @@ function logStep(step, message) {
     console.log(`  [${step}] ${message}`)
 }
 
+/**
+ * bot 是否已经站在某个配置点附近（水平 + 垂直都够近）。
+ * 用于 GetSeeds 之后判断"还需不需要再导航一次"，避免明明就在播种区却重复寻路。
+ */
+function isNearPoint(point, radius = 3) {
+    if (!point || !bot?.entity) return false
+    const p = bot.entity.position
+    const dx = p.x - point.x
+    const dy = p.y - point.y
+    const dz = p.z - point.z
+    return Math.abs(dx) <= radius && Math.abs(dz) <= radius && Math.abs(dy) <= 3
+}
+
+// 周期性坐标日志：每 POS_LOG_INTERVAL_MS 打印一次位置与状态。
+// 寻路失败时能直接看到"人到底在哪、有没有在动"，不用靠猜。
+const POS_LOG_INTERVAL_MS = 10000
+let posLogTimer = null
+
+function startPositionLogger() {
+    stopPositionLogger()
+    let lastPos = bot.entity.position.clone()
+    let lastTime = Date.now()
+    posLogTimer = setInterval(() => {
+        if (!bot || !bot.entity) return
+        const pos = bot.entity.position
+        const now = Date.now()
+        const moved = pos.distanceTo(lastPos)
+        const speed = moved / ((now - lastTime) / 1000)
+        console.log(`[坐标] (${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)}) ` +
+            `速度${speed.toFixed(2)}/s 食物${bot.food ?? '?'}/20 ` +
+            `状态${masterData.detailStatus || '-'} 卡住计数${bot._jumpGuardBlocked || 0}`)
+        lastPos = pos.clone()
+        lastTime = now
+    }, POS_LOG_INTERVAL_MS)
+}
+
+function stopPositionLogger() {
+    if (posLogTimer) {
+        clearInterval(posLogTimer)
+        posLogTimer = null
+    }
+}
+
 function createBot() {
     bot = mineflayer.createBot(serverConfig)
     bot.loadPlugin(pathfinder)
@@ -58,6 +108,7 @@ function createBot() {
         configureMovements(bot)
         setupStateMachine()
         registerCommands(bot, startFarming, stopFarming)
+        startPositionLogger()
 
         // 兜底进食：只有在没有正在进行的进食/BedEat 流程时才介入，
         // 否则会和 BehaviorEat 并发 equip/consume 冲突（isEating 由 BehaviorEat 持有）
@@ -65,7 +116,11 @@ function createBot() {
             if (bot.food <= 6 && !masterData.isEating) {
                 console.log(`[警告] 食物值过低: ${bot.food}/20，强制进食`)
                 masterData.isEating = true
-                forceEat()
+                // 竞态守卫：BehaviorEat 状态若在本轮 forceEat 进行中启动（onStateEntered
+                // 会 bump 此 id），forceEat 结束时就【不能】清掉 isEating，否则会出现
+                // "兜底进食 + 状态机进食"并发 consume 冲突
+                const myRun = ++masterData._eatRunId
+                forceEat(myRun)
             }
         })
 
@@ -83,20 +138,59 @@ function createBot() {
     bot.on('end', () => { console.log('连接断开'); handleDisconnect() })
 }
 
-async function forceEat() {
+async function forceEat(myRun) {
     try {
+        // 先确保手上有面包：背包没有就去 pos2 箱子取一次。
+        // 原实现直接 `if (!bread) return`，所以背包一旦没面包，兜底进食就永久失效。
         let bread = bot.inventory.items().find(i => i.name === 'bread')
-        if (!bread) { masterData.isEating = false; return }
-        while (bot.food < 18) {
+        if (!bread) {
+            try {
+                const eat = getEatBehavior()
+                if (eat) {
+                    const pos2 = masterData.pos2
+                    if (pos2 && bot.entity.position.distanceTo(new Vec3(pos2.x, pos2.y, pos2.z)) > 3) {
+                        await eat._gotoPos2()
+                    }
+                    await eat.fetchBreadFromChest()
+                }
+            } catch (e) {
+                console.log(`[强制进食] 取面包失败: ${e.message}`)
+            }
+            bread = bot.inventory.items().find(i => i.name === 'bread')
+        }
+        if (!bread) {
+            console.log('[强制进食] 背包和附近箱子里都没有面包')
+            return
+        }
+
+        let lastErr = null
+        for (let attempt = 0; attempt < 3 && bot.food < 18; attempt++) {
             bread = bot.inventory.items().find(i => i.name === 'bread')
             if (!bread) break
-            await bot.equip(bread, 'hand')
-            await bot.consume()
+            try {
+                await bot.equip(bread, 'hand')
+                await bot.consume()
+                lastErr = null
+            } catch (e) {
+                lastErr = e
+                // "Consuming cancelled due to calling bot.consume() again" 多半是上一轮 consume
+                // 还没收尾；退避重试，不要一次失败就彻底不吃（会一直饿着去干活）
+                await new Promise(r => setTimeout(r, 1000))
+            }
+        }
+        if (bot.food < 18) {
+            console.log(`[强制进食] 结束时食物仍为 ${bot.food}/20` + (lastErr ? `，最后错误: ${lastErr.message}` : ''))
         }
     } catch (e) {
         console.log(`[强制进食] 失败: ${e.message}`)
+    } finally {
+        // 无论走哪条路径都必须释放锁，否则之后所有兜底进食都会被 isEating 挡住。
+        // 但如果期间 BehaviorEat 状态已接管（id 被它 bump），锁归它管，不能在这里清
+        const latestRun = masterData._eatRunId || 0
+        if (myRun == null || myRun === latestRun) {
+            masterData.isEating = false
+        }
     }
-    masterData.isEating = false
 }
 
 function setupStateMachine() {
@@ -114,6 +208,7 @@ function setupStateMachine() {
 
     const checkHunger = new BehaviorCheckHunger(bot, masterData)
     const eat = new BehaviorEat(bot, masterData)
+    eatBehavior = eat
     const activateLever = new BehaviorOperateLever(bot, masterData, 'on')
     const waitHarvest = new BehaviorWaitHarvest(bot, masterData)
     const deactivateLever = new BehaviorOperateLever(bot, masterData, 'off')
@@ -198,6 +293,9 @@ function setupStateMachine() {
             child: getSeeds,
             shouldTransition: () => checkHunger.checked && !checkHunger.needsFood && !masterData._needsHarvest
         }),
+        // 【已删除】曾经的重复转移 `checkHunger → eat` 带 `masterData.forceEat` 条件：
+        // forceEat 是本文件的函数，masterData 上根本没有这个字段，恒为 undefined，
+        // 整条转移是死代码（与上面 271 行的 checkHunger→eat 完全重复）。
 
         // Eat -> ActivateLever（吃完 + 需要收割）
         new StateTransition({
@@ -245,25 +343,42 @@ function setupStateMachine() {
             shouldTransition: () => deactivateLever.isFinished && !deactivateLever.succeeded
         }),
 
-        // GetSeeds -> Idle（锄头不足时等待）
+        // GetSeeds -> PlantSeeds（物资充足，且已经站在播种区 → 直接开播，无需再导航）
         new StateTransition({
             parent: getSeeds,
-            child: idle,
-            shouldTransition: () => getSeeds.isFinished && getSeeds.noHoes
+            child: plantSeeds,
+            shouldTransition: () => getSeeds.isFinished && !getSeeds.noHoes && isNearPoint(masterData.pos1)
         }),
 
-        // GetSeeds -> GoToPos1（物资充足时继续）
+        // GetSeeds -> GoToPos1（物资充足但还没到播种区）
         new StateTransition({
             parent: getSeeds,
             child: gotoPos1,
-            shouldTransition: () => getSeeds.isFinished && !getSeeds.noHoes
+            shouldTransition: () => getSeeds.isFinished && !getSeeds.noHoes && !isNearPoint(masterData.pos1)
         }),
 
-        // GoToPos1 -> PlantSeeds
+        // GetSeeds -> WaitMaturity（没取到锄头/种子）
+        // 【重要】失败分支不能指回"自己的父状态"，否则形成 [父 → 取物资 → 父] 的零间隔死循环。
+        // 但仅靠换目标还不够：本流程本身就是一个环（waitMaturity → getSeeds → ...），
+        // 所以 BehaviorGetSeeds.onStateEntered 里还有一道 supplyRetryAt 冷却闸门兜底。
+        new StateTransition({
+            parent: getSeeds,
+            child: waitMaturity,
+            shouldTransition: () => getSeeds.isFinished && getSeeds.noHoes
+        }),
+
+        // GoToPos1 -> PlantSeeds（必须真正到达，否则不许开播）
         new StateTransition({
             parent: gotoPos1,
             child: plantSeeds,
-            shouldTransition: () => gotoPos1.isFinished
+            shouldTransition: () => gotoPos1.isFinished && gotoPos1.arrived
+        }),
+
+        // GoToPos1 -> CheckHunger（没走到就回去重新决策；播种状态自带位置守卫，会拒绝在区外开播）
+        new StateTransition({
+            parent: gotoPos1,
+            child: checkHunger,
+            shouldTransition: () => gotoPos1.isFinished && !gotoPos1.arrived
         }),
 
         // PlantSeeds -> GoToPos2
@@ -277,7 +392,14 @@ function setupStateMachine() {
         new StateTransition({
             parent: gotoPos2,
             child: waitMaturity,
-            shouldTransition: () => gotoPos2.isFinished
+            shouldTransition: () => gotoPos2.isFinished && gotoPos2.arrived
+        }),
+
+        // GoToPos2 -> CheckHunger（回程失败：先补状态再重新决策，不要假装已回到等待区）
+        new StateTransition({
+            parent: gotoPos2,
+            child: checkHunger,
+            shouldTransition: () => gotoPos2.isFinished && !gotoPos2.arrived
         }),
 
         // Sleep -> WaitMaturity（醒来后继续工作）
@@ -323,6 +445,7 @@ function handleDisconnect() {
     if (isShuttingDown || isReconnecting) return
     isReconnecting = true
     stateMachine = null
+    stopPositionLogger()
 
     // 关闭旧的 Web 可视化：它持有旧 bot / stateMachine 的引用，
     // 重连后不会自动切换（页面永远停在旧状态机），而且会一直占着端口
@@ -381,6 +504,7 @@ async function shutdown(signal = 'SIGINT') {
 
     logStep('4/4', '关闭 Web 服务并保存配置...')
     stopBackgroundTasks()
+    stopPositionLogger()
     if (webserver?.isServerRunning()) {
         try { await webserver.stopServer() } catch (e) { /* ignore */ }
     }

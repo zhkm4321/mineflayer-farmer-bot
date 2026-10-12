@@ -19,9 +19,17 @@ function configureMovements(bot) {
 
     movements.canDig = false
     movements.allow1by1towers = false
-    movements.allowParkour = true
+    // 禁止"抄近路式"跳跃。pathfinder 选择动作的顺序是（lib/index.js:611-629）：
+    //   1. allowSprinting && canStraightLine(sprint)   → 冲刺，不跳
+    //   2. allowSprinting && canSprintJump              → 冲刺 + 跳   ← 会"蹦"
+    //   3. canStraightLine                              → 步行，不跳   ← 上楼梯靠这条
+    //   4. canWalkJump                                  → 跳
+    // 第 2 条排在第 3 条前面，所以开启冲刺时，凡是"走不上去"的地方都会优先尝试跳上去。
+    // 关掉冲刺后，能走的地方一律走（含 0.5/0.6 的台阶自动上台阶），只有物理上必须跳才跳。
+    movements.allowSprinting = false
+    // 跨沟/长距离跑酷跳跃一律禁用
+    movements.allowParkour = false
     movements.allowFreeMotion = true
-    movements.allowSprinting = true
     movements.allowEntityDetection = false
     movements.canOpenDoors = true
 
@@ -39,20 +47,33 @@ function configureMovements(bot) {
         if (block) movements.emptyBlocks.add(block.type)
     }
 
-    // 台阶/半砖可行走（如农田中的 stone_slab 通道）
-    for (const block of registry.blocksArray) {
-        if (block.name.endsWith('_slab') || block.name === 'snow') {
-            movements.carpets.add(block.id)
-        }
-    }
+    // 【重要】不要把 *_slab / 楼梯 加进 movements.carpets！
+    // carpets 的语义是"这种方块可以站进去、视同空气"（pathfinder 默认只收录碰撞高度 < 0.1 的
+    // 真地毯/雪片，见 lib/movements.js:88-89），而半砖/楼梯是实体方块。
+    // 一旦加进去，pathfinder 会同时认为它 physical=true 且 safe=true，于是规划出"穿过半砖"的
+    // 路径；机器人物理上撞在半砖上走不动，pathfinder 每 3.5s 判定 stuck 重规划、又算出同样的
+    // 路径，循环到 30s wall-clock 超时（现象就是"有路但永远走不到"）。
+    // 半砖/楼梯交给 pathfinder 按碰撞高度原生处理即可，本来就能走。
 
     bot.pathfinder.setMovements(movements)
 
+    // A* 默认 thinkTimeout=5000ms、searchRadius=-1（不限半径）。
+    // 在"上层农田 + 下层通道"这种大地形里，5 秒很容易被 A* 全部烧在搜索上，
+    // 于是报 "Took to long to decide path to goal!" 而不是给出一条路径。
+    // 放宽思考时间，并限制搜索半径，避免为了一个 10 格的目标去遍历整片农田。
+    bot.pathfinder.thinkTimeout = 15000
+    if (bot.pathfinder.searchRadius === -1) bot.pathfinder.searchRadius = 64
+
     if (!bot._farmlandJumpGuard) {
         bot._farmlandJumpGuard = true
+        // 计数：守卫拦下了多少次跳跃。pathfinder 若正需要跳着上台阶却被拦，这个值会持续增长，
+        // pathfinderGoto 靠它快速失败，而不是傻等 30s 超时。
+        if (bot._jumpGuardBlocked == null) bot._jumpGuardBlocked = 0
         bot.on('physicsTick', () => {
-            if (bot.controlState.jump && isOnNoJumpBlock(bot)) {
+            // 耕地上原地/平跳 → 拦；前方有 +1 台阶（跳上去不会落回耕地，不会踩坏）→ 放行
+            if (bot.controlState.jump && shouldBlockJump(bot)) {
                 bot.setControlState('jump', false)
+                bot._jumpGuardBlocked++
             }
         })
     }
@@ -91,13 +112,64 @@ function isNearBlock(bot, pos, reach = REACH) {
     return bot.entity.position.distanceTo(center) <= reach
 }
 
+/** 寻路卡住时是否允许 /tp 脱困（需服务器授予 bot minecraft.command.teleport 权限） */
+let teleportFallbackEnabled = true
+function setTeleportFallbackEnabled(v) { teleportFallbackEnabled = !!v }
+
+/**
+ * 寻路卡住/超时后的兜底：用 /tp 直接传送到目标附近。
+ *
+ * 依据实测（2025-10-10 probe-stuck.js 探测）：A* 规划成功的路径也可能物理走不动 ——
+ * 例如从 (1028,60,598) 出发的第一个斜穿步，夹角方块是 stone_bricks+箱子 两格高的墙，
+ * 碰撞箱必然剐蹭卡死，pathfinder 每 3.5s 重规划出同样的路径，跳也没用（墙太高），
+ * 只能等 30s 超时。服务器授予传送权限后，/tp 是最省事的脱困方式。
+ *
+ * 注意：GoalLookAtBlock 的 x/y/z 是"被看的方块"而不是站位，tp 进去会窒息，必须跳过。
+ * @returns {Promise<boolean>} true = 已传送到目标附近，本次导航视为成功
+ */
+async function tryTeleportEscape(bot, goal) {
+    if (!teleportFallbackEnabled) return false
+    if (!goal || !Number.isFinite(goal.x) || !Number.isFinite(goal.y) || !Number.isFinite(goal.z)) return false
+    if (goal.constructor && goal.constructor.name === 'GoalLookAtBlock') return false
+
+    // 默认目标点可能是方块坐标（尤其 farmland 自身格），直接传送到 goal.y 会把实体塞进方块，
+    // 服务器随后将其推出/落回底层。本次导航可通过 goal.teleportYOffset 指定安全站立高度。
+    const tpYOffset = Number.isFinite(goal.teleportYOffset) ? goal.teleportYOffset : 0
+    const target = new Vec3(goal.x + 0.5, goal.y + tpYOffset, goal.z + 0.5)
+    const before = bot.entity.position.clone()
+    console.log(`[寻路] 尝试 /tp 脱困 → (${target.x.toFixed(1)},${target.y},${target.z.toFixed(1)})`)
+    bot.chat(`/minecraft:tp ${target.x} ${target.y} ${target.z}`)
+    await sleep(1800)
+
+    const after = bot.entity.position
+    const range = Number.isFinite(goal.range) ? Math.max(goal.range, 1.5) : 3
+    bot.clearControlStates()
+    if (after.distanceTo(target) <= range) {
+        console.log('[寻路] /tp 脱困成功')
+        return true
+    }
+    if (after.distanceTo(before) > 0.5) {
+        // 传到了别处但确实动了：不算到达，交给上层重新决策
+        console.log('[寻路] /tp 已生效但未到目标附近，放弃本次导航')
+        return false
+    }
+    console.log('[寻路] /tp 未生效 (可能缺少传送权限)，继续按失败处理')
+    return false
+}
+
 /**
  * pathfinder.goto 包装：避免超时 stop() 与 PathStopped 竞态
- * 增加卡住检测：执行中如果 bot 持续未移动则尝试跳跃越过障碍
+ * 增加卡住检测：执行中如果 bot 持续未移动则尝试跳跃越过障碍；
+ * 若跳跃被"耕地保护"守卫连续拦下，说明这段路物理上必须跳，直接快速失败而不是干等超时；
+ * 卡住 10 秒仍无进展时用 /tp 脱困（探测证实部分卡点物理上无解，重规划无意义）。
  * @see mineflayer-pathfinder lib/goto.js
  */
 async function pathfinderGoto(bot, goal, timeoutMs) {
     let timedOut = false
+    let bailed = false // 因"必须跳跃但被耕地保护拦截"主动放弃
+    let escapeTried = false // 每次 goto 只尝试一次 /tp 脱困
+    const startedAt = Date.now()
+    const hasTarget = Number.isFinite(goal?.x) && Number.isFinite(goal?.y) && Number.isFinite(goal?.z)
     const timer = setTimeout(() => {
         timedOut = true
         bot.pathfinder.setGoal(null)
@@ -105,16 +177,52 @@ async function pathfinderGoto(bot, goal, timeoutMs) {
 
     let lastPos = bot.entity.position.clone()
     let stuckTicks = 0
+    let lastJumpTryTicks = 0
+    let lastPathUpdate = 0
+    const blockedAtStart = bot._jumpGuardBlocked || 0
     const stuckChecker = () => {
+        if (bailed) return
         const pos = bot.entity.position
         const moved = pos.distanceTo(lastPos)
+        // 每 3 秒汇报一次：位置 / 速度 / 剩余距离 / 是否在移动。
+        // 光看 "timeout" 无法区分"真的没路"和"原地卡死"，这里把过程打出来
+        if (Date.now() - lastPathUpdate > 3000) {
+            lastPathUpdate = Date.now()
+            const elapsed = ((Date.now() - startedAt) / 1000).toFixed(0)
+            const speed = (moved / 0.25).toFixed(2)
+            const dist = hasTarget ? pos.distanceTo(new Vec3(goal.x, goal.y, goal.z)).toFixed(1) : '?'
+            const status = bot.pathfinder.isMoving?.() ? '移动中' : '未移动'
+            console.log(`[寻路] ${elapsed}s 坐标(${pos.x.toFixed(1)},${pos.y.toFixed(1)},${pos.z.toFixed(1)}) ` +
+                `速度${speed}/s 距目标 ${dist} 格 ${status} 卡住计数${stuckTicks}`)
+        }
         if (moved < 0.03) {
             stuckTicks++
             if (stuckTicks >= 3 && bot.entity.onGround) {
+                // 守卫连续拦截跳跃 → 这一段路非要跳不可，早点报错
+                if ((bot._jumpGuardBlocked || 0) - blockedAtStart >= 5) {
+                    bailed = true
+                    bot.pathfinder.setGoal(null)
+                    return
+                }
+                // 卡住 10 秒仍无进展：跳跃试过了也没用（实测有些卡点物理无解），
+                // 取消寻路触发 goto reject，在 catch 里执行 /tp 脱困
+                if (stuckTicks >= 40 && !escapeTried) {
+                    escapeTried = true
+                    console.log(`[寻路] 连续 ${stuckTicks} 次未移动，请求 /tp 脱困`)
+                    bot.pathfinder.setGoal(null)
+                    return
+                }
+                // 自上次尝试跳跃以来仍无进展，说明跳也没用：不再重复刷日志，只继续物理尝试
+                if (stuckTicks - lastJumpTryTicks >= 12) {
+                    lastJumpTryTicks = stuckTicks
+                    console.log(`[寻路] 连续 ${stuckTicks} 次未移动，尝试跳跃脱困 ` +
+                        `坐标(${pos.x.toFixed(1)},${pos.y.toFixed(1)},${pos.z.toFixed(1)})`)
+                }
                 safeJump(bot)
             }
         } else {
             stuckTicks = 0
+            lastJumpTryTicks = 0
         }
         lastPos = pos.clone()
     }
@@ -123,6 +231,11 @@ async function pathfinderGoto(bot, goal, timeoutMs) {
     try {
         await bot.pathfinder.goto(goal)
     } catch (err) {
+        // 兜底：卡死/超时后用 /tp 直接脱困（卡住 10s 的主动取消和超时都会走到这里）
+        const escapeOk = hasTarget && !escapeTried && await tryTeleportEscape(bot, goal)
+        if (escapeOk) return
+
+        if (bailed) throw new Error('此段路必须跳跃，但被耕地保护拦截')
         if (timedOut) throw new Error('timeout')
         const msg = err.message || String(err)
         if (err.name === 'NoPath' || msg.includes('No path')) {
@@ -216,13 +329,50 @@ async function gotoNear(bot, pos, range = 2, timeoutMs = 10000, options = {}) {
     }
 }
 
-const NO_JUMP_BLOCKS = new Set(['farmland', 'birch_slab'])
+// 只在"耕地"上禁止跳跃：原地起跳落回耕地 fallDistance≈1.2 > 原版踩踏阈值 0.5，
+// 会以 (fallDistance-0.5) 的概率把耕地踩回泥土。
+// 半砖/楼梯【不】在此列 —— 在半砖上跳一下不会破坏任何东西，把它们列进来反而会让机器人
+// 永远上不了半砖楼梯（想跳就立刻被取消，动作永远完不成）。
+const NO_JUMP_BLOCKS = new Set(['farmland'])
 
-/** 脚下是否为禁止跳跃的方块 */
+/**
+ * 脚下是否为禁止跳跃的方块。
+ * 【注意】耕地碰撞箱高度 15/16，站在耕地上时脚部 Y = 耕地格Y + 0.9375，
+ * 所以支撑格是 floor(脚部Y) 本身而不是 floor-1（普通满格方块才是 floor-1）。
+ * 两种情况都要查，否则守卫在耕地上永远不触发（实测踩过这个坑）。
+ */
 function isOnNoJumpBlock(bot) {
     const pos = bot.entity.position
-    const below = bot.blockAt(new Vec3(Math.floor(pos.x), Math.floor(pos.y) - 1, Math.floor(pos.z)))
-    return below != null && NO_JUMP_BLOCKS.has(below.name)
+    const baseY = Math.floor(pos.y)
+    const belowFull = bot.blockAt(new Vec3(Math.floor(pos.x), baseY - 1, Math.floor(pos.z)))
+    if (belowFull != null && NO_JUMP_BLOCKS.has(belowFull.name)) return true
+    // 低碰撞箱支撑（耕地 0.9375）：脚部落在支撑格内部
+    const belowLow = bot.blockAt(new Vec3(Math.floor(pos.x), baseY, Math.floor(pos.z)))
+    return belowLow != null && NO_JUMP_BLOCKS.has(belowLow.name)
+}
+
+/**
+ * 前方是否有 +1 台阶需要跳上去。
+ * 跳上台阶时落回高度只比起跳高 1 格，落回时 fallDistance≈0.25 < 0.5 踩踏阈值，
+ * 且起跳块不会被落回 —— 这种跳跃【不会】踩坏耕地，应当放行。
+ * 真正危险的是原地跳/平跳落回耕地（fallDistance≈1.2），那才是要拦的。
+ */
+function isStepUpAhead(bot) {
+    const pos = bot.entity.position
+    const yaw = bot.entity.yaw ?? 0
+    const dx = -Math.sin(yaw)
+    const dz = -Math.cos(yaw)
+    const feetY = Math.floor(pos.y)
+    for (const d of [0.6, 1.1]) {
+        const ahead = bot.blockAt(new Vec3(Math.floor(pos.x + dx * d), feetY, Math.floor(pos.z + dz * d)))
+        if (ahead && ahead.boundingBox === 'block') return true
+    }
+    return false
+}
+
+/** 脚下在耕地上且前方没有台阶 → 该跳被禁 */
+function shouldBlockJump(bot) {
+    return isOnNoJumpBlock(bot) && !isStepUpAhead(bot)
 }
 
 /** 检测前方是否有需要跳跃才能越过的方块 */
@@ -240,9 +390,9 @@ function hasBlockAhead(bot) {
     return block && block.boundingBox === 'block'
 }
 
-/** 安全跳跃：在禁跳方块上不跳 */
+/** 安全跳跃：原地/平跳落回耕地时禁跳；前方有台阶的起跳放行 */
 function safeJump(bot) {
-    if (isOnNoJumpBlock(bot)) return false
+    if (shouldBlockJump(bot)) return false
     bot.setControlState('jump', true)
     setTimeout(() => bot.setControlState('jump', false), 120)
     return true
@@ -257,7 +407,9 @@ async function walkToFlat(bot, pos, timeoutMs = 5000, reach = REACH) {
     let stuckCount = 0
 
     bot.setControlState('forward', true)
-    bot.setControlState('sprint', true)
+    // 【不要 sprint】冲刺跳落地 fallDistance≈1.2 > 0.5 阈值，会踩坏耕地；
+    // 而且冲刺跳飞行 4+ 格会冲过头，对 0.45 精度的对齐毫无帮助
+    bot.setControlState('sprint', false)
 
     try {
         while (Date.now() - startTime < timeoutMs) {
@@ -289,9 +441,7 @@ async function walkToFlat(bot, pos, timeoutMs = 5000, reach = REACH) {
         bot.setControlState('sprint', false)
         bot.setControlState('jump', false)
     }
-}
-
-/** 作物方块中心（用于距离/视线判定） */
+}/** 作物方块中心（用于距离/视线判定） */
 function getCropCenter(soilPos) {
     return floorPos(soilPos).offset(0.5, 1.5, 0.5)
 }
@@ -323,8 +473,12 @@ function isFacingFarmland(bot, soilPos) {
 /** 是否站在目标耕地格上（X/Z 对齐） */
 function isStandingOnSoil(bot, soilPos) {
     const s = floorPos(soilPos)
-    return Math.floor(bot.entity.position.x) === s.x &&
-        Math.floor(bot.entity.position.z) === s.z
+    const p = bot.entity.position
+    // 必须校验 Y：只比 X/Z 会把“站在上层耕地下方的泥土块”误判成站上了上层耕地。
+    // farmland 被加入 pathfinder.carpets 后，站在 y=69 farmland 时脚部 floor(Y)=69。
+    return Math.floor(p.x) === s.x &&
+        Math.floor(p.y) === s.y &&
+        Math.floor(p.z) === s.z
 }
 
 /** 获取 bot 脚下的 farmland */
@@ -350,7 +504,13 @@ function getStandCenterOnSoil(soilPos) {
 
 /** 移动到目标耕地格上站定 */
 async function moveToStandOnSoil(bot, soilPos, options = {}) {
-    if (options.workAreaChecker && !options.workAreaChecker({ x: soilPos.x, z: soilPos.z })) {
+    // workAreaChecker 可能带 y 校验（如 DaoXiang 的分层梯田）—— 把 y 一起传过去，
+    // 只传 {x,z} 会让 "pos.y === 期望层" 的检查拿到 undefined 恒为 false
+    if (options.workAreaChecker &&
+        !options.workAreaChecker({ x: soilPos.x, y: soilPos.y, z: soilPos.z })) {
+        if (options.debugMovement) {
+            console.log(`[移动][诊断] workAreaChecker 拒绝地块 (${soilPos.x},${soilPos.y},${soilPos.z})`)
+        }
         return false
     }
 
@@ -360,11 +520,31 @@ async function moveToStandOnSoil(bot, soilPos, options = {}) {
     }
 
     stopMovement(bot)
-    await moveToFlat(bot, getStandCenterOnSoil(soilPos), {
-        ...options,
-        reach: 0.45,
-        timeoutMs: options.timeoutMs || 10000
-    }).catch(() => false)
+    if (options.pathfinderOnly) {
+        // 农田格之间/跨一格台阶，用 pathfinder 的 XZ 目标定位到方块列；
+        // 旧的 walkToFlat 是自定义直线控制，遇到低碰撞箱耕地可能停在相邻格，且吞掉了失败原因。
+        try {
+            // farmland 已按 carpet 语义建模，pathfinder 的脚部节点 Y 与 farmland block Y 相同。
+            // 用精确 GoalBlock(x,y,z) 防止 GoalNearXZ 误停在上层耕地正下方的泥土格。
+            const goal = new goals.GoalBlock(soilPos.x, soilPos.y, soilPos.z)
+            // Teleporting to farmland's own block Y embeds the player in its 15/16 collision box;
+            // server collision correction can eject them under the farm into the water. Always land above it.
+            goal.teleportYOffset = options.teleportYOffset ?? 1
+            await pathfinderGoto(bot, goal, options.timeoutMs || 10000)
+        } catch (e) {
+            if (options.debugMovement) {
+                console.log(`[移动][诊断] GoalBlock 失败 soil=(${soilPos.x},${soilPos.y},${soilPos.z}): ${e.message}`)
+            }
+        }
+    } else {
+        await moveToFlat(bot, getStandCenterOnSoil(soilPos), {
+            ...options,
+            reach: 0.45,
+            timeoutMs: options.timeoutMs || 10000
+        }).catch((e) => {
+            if (options.debugMovement) console.log(`[移动][诊断] moveToFlat 失败: ${e.message}`)
+        })
+    }
 
     if (isStandingOnSoil(bot, soilPos)) {
         console.log(`[移动] 站上耕地 (${soilPos.x},${soilPos.z})`)
@@ -637,5 +817,10 @@ module.exports = {
     moveToFlat,
     stopMovement,
     pathfinderGoto,
+    tryTeleportEscape,
+    setTeleportFallbackEnabled,
+    isOnNoJumpBlock,
+    isStepUpAhead,
+    shouldBlockJump,
     sleep
 }

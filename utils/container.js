@@ -29,25 +29,40 @@ async function openChestContainer(bot, block, options = {}) {
 
     // 第一步：用 GoalLookAtBlock 让 pathfinder 自动选择能看到箱子面的位置
     try {
-        await approachChest(bot, pos, Math.min(timeoutMs, 15000))
+        await approachChest(bot, pos, Math.min(Math.floor(timeoutMs / 2), 8000))
     } catch (e) {
         console.log(`[箱子] GoalLookAtBlock 失败: ${e.message}，将尝试四面靠近`)
     }
 
-    // 检查是否已可交互
-    const tryOpen = async () => {
+    // 检查是否已可交互。
+    // 【重要】bot.openContainer 内部固定等 windowOpen 20 秒（mineflayer 的 once() 默认值，
+    // 且 openBlock 不暴露 timeout 参数），这个 20s 会吃掉整个预算，导致下面"四面靠近"的兜底
+    // 因为 remain < 3000 一次都跑不到。所以这里必须自己加 race 把单次开箱压到 6 秒。
+    const tryOpen = async (openTimeoutMs = 6000) => {
         bot.clearControlStates()
         await sleep(200)
         if (!isNearBlock(bot, pos, 4.5)) return null
         await bot.lookAt(pos.offset(0.5, 0.5, 0.5), true)
         await sleep(100)
-        return await bot.openContainer(block)
+        let timer = null
+        try {
+            return await Promise.race([
+                bot.openContainer(block),
+                new Promise((resolve) => {
+                    timer = setTimeout(() => resolve(null), openTimeoutMs)
+                })
+            ])
+        } finally {
+            if (timer) clearTimeout(timer)
+        }
     }
 
     if (isNearBlock(bot, pos, 4.5)) {
+        const remainFirst = Math.max(4000, Math.min(6000, deadline - Date.now()))
         try {
-            const w = await tryOpen()
+            const w = await tryOpen(remainFirst)
             if (w) return w
+            console.log(`[箱子] 当前位置开箱超时(${Math.round(remainFirst / 1000)}s)，转为四面靠近`)
         } catch (e) {
             console.log(`[箱子] 当前位置开箱失败: ${e.message}`)
         }
@@ -75,7 +90,7 @@ async function openChestContainer(bot, block, options = {}) {
 
     for (const { standPos } of sortedFaces) {
         const remain = deadline - Date.now()
-        if (remain < 3000) break
+        if (remain < 6000) break
 
         console.log(`[箱子] 尝试从 (${standPos.x},${standPos.y},${standPos.z}) 靠近箱子`)
         bot.clearControlStates()
@@ -84,7 +99,7 @@ async function openChestContainer(bot, block, options = {}) {
             await pathfinderGoto(
                 bot,
                 new goals.GoalNear(standPos.x + 0.5, standPos.y, standPos.z + 0.5, 1),
-                Math.min(remain, 12000)
+                Math.min(remain - 5000, 12000)
             )
         } catch (e) {
             console.log(`[箱子] 寻路到 (${standPos.x},${standPos.z}) 失败: ${e.message}`)
@@ -92,7 +107,7 @@ async function openChestContainer(bot, block, options = {}) {
         }
 
         try {
-            const w = await tryOpen()
+            const w = await tryOpen(Math.min(6000, Math.max(4000, deadline - Date.now())))
             if (w) return w
         } catch (e) {
             console.log(`[箱子] 在 (${standPos.x},${standPos.z}) 开箱失败: ${e.message}`)

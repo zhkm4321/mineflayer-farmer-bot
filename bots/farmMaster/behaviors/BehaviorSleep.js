@@ -76,6 +76,24 @@ class BehaviorSleep {
         await sleep(300)
     }
 
+    /** 等待官方 'wake' 事件（服务器确认起床后由 mineflayer bed.js:186 发出）。
+     *  bot.sleep() 在"入睡成功"时就 resolve（bed.js waitUntilSleep 监听 'sleep' 事件），
+     *  旧代码在 sleep() 返回后立刻打"天亮了，起床!"——实际还在深夜，
+     *  随后状态机切走触发 onStateExited → bot.wake() 把自己从床上拽起来，
+     *  于是整夜都在"上床-立刻起床"循环，从来没真正睡到天亮。 */
+    _waitWake(timeoutMs) {
+        return new Promise((resolve) => {
+            if (!this.bot.isSleeping) return resolve()
+            const cleanup = () => {
+                clearTimeout(timer)
+                this.bot.removeListener('wake', onWake)
+            }
+            const onWake = () => { cleanup(); resolve() }
+            const timer = setTimeout(() => { cleanup(); resolve() }, timeoutMs)
+            this.bot.once('wake', onWake)
+        })
+    }
+
     async run() {
         try {
             if (!BehaviorSleep.isNight(this.bot)) {
@@ -109,11 +127,14 @@ class BehaviorSleep {
             }
 
             this.masterData.detailStatus = '睡觉中'
-            console.log('[睡觉] 上床睡觉')
+            console.log('[睡觉] 上床睡觉，等待天亮')
             await this.bot.sleep(bed)
             this.slept = true
             this.masterData.sleepFailedUntil = 0
-            console.log(`[睡觉] 天亮了，起床! 时间: ${this.bot.time.timeOfDay}`)
+
+            // 等服务器确认"天亮被强制起床"（wake 事件）；update() 的主动 wake 也会触发它
+            await this._waitWake(MAX_SLEEP_MS)
+            console.log(`[睡觉] 醒来了，当前时间: ${this.bot.time?.timeOfDay ?? '?'}`)
         } catch (e) {
             const msg = e.message || String(e)
             if (msg.includes('wake')) {

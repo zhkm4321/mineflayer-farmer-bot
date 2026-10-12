@@ -18,7 +18,9 @@ class BehaviorEat {
     onStateEntered() {
         this.isFinished = false
         this.startTime = Date.now()
-        // 占用进食锁：index.js 的 health 兜底 forceEat 看到 isEating=true 就不会并发 consume
+        // 占用进食锁：index.js 的 health 兜底 forceEat 看到 isEating=true 就不会并发 consume。
+        // 同时 bump _eatRunId，让"期间仍在飞行中的 forceEat"结束时不清掉这个锁
+        this.masterData._eatRunId = (this.masterData._eatRunId || 0) + 1
         this.masterData.isEating = true
         this.masterData.detailStatus = '进食中'
         this.runEat()
@@ -97,19 +99,27 @@ class BehaviorEat {
         this.isFinished = true
     }
 
-    async fetchBreadFromChest() {
+    async fetchBreadFromChest(skipGoto = false) {
         const pos2 = this.masterData.pos2
         const searchPoint = pos2 ? new Vec3(pos2.x, pos2.y, pos2.z) : undefined
 
-        const chests = this.bot.findBlocks({
+        // pos2 附近没箱子时，退而搜当前位置周围，避免"明明站在箱子边上却说附近没箱子"
+        let chests = this.bot.findBlocks({
             matching: block => block.name === 'chest' || block.name === 'trapped_chest',
             maxDistance: 4,
             count: 5,
             point: searchPoint
         })
+        if (chests.length === 0 && !skipGoto) {
+            chests = this.bot.findBlocks({
+                matching: block => block.name === 'chest' || block.name === 'trapped_chest',
+                maxDistance: 6,
+                count: 5
+            })
+        }
         if (chests.length === 0) {
             console.log('[进食] pos2 附近未找到箱子')
-            return
+            return false
         }
 
         const sorted = chests.sort((a, b) =>
@@ -117,7 +127,9 @@ class BehaviorEat {
         )
 
         for (const chestPos of sorted) {
-            if (!this.active) return
+            // 注意：兜底路径（forceEat）调用时 active 为 false，这里不能再用 active 拦截，
+            // 否则走到一半就直接 return，兜底进食永远拿不到面包。
+            if (this.masterData.stopRequested) return false
             const chestBlock = this.bot.blockAt(chestPos)
             if (!chestBlock) continue
 
@@ -128,18 +140,22 @@ class BehaviorEat {
                     await chest.withdraw(breadSlot.type, null, Math.min(breadSlot.count, 32))
                     console.log('[进食] 从箱子取到面包')
                     chest.close()
-                    return
+                    return true
                 }
                 chest.close()
             } catch (e) {
-                // skip
+                // 记录开箱失败原因，"附近箱子中没有面包"会掩盖真正的协议/权限问题
+                console.log(`[进食] 开箱失败 (${chestPos.x},${chestPos.y},${chestPos.z}): ${e.message}`)
             }
         }
         console.log('[进食] 附近箱子中没有面包')
+        return false
     }
 
     update() {
-        if (Date.now() - this.startTime > 30000) {
+        // 30s 窗口太小：光是"走去 pos2 + 开箱"就可能超过它（开箱单次最多 20s 超时），
+        // 结果进食被中途打断，食物值没补上就进入等待状态。放宽到 5 分钟。
+        if (Date.now() - this.startTime > 300000) {
             this.isFinished = true
         }
     }

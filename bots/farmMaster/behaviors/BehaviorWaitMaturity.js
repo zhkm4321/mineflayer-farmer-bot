@@ -3,6 +3,9 @@ const { isInWorkArea } = require('../config')
 
 // 连续 N 次扫描农田状态毫无变化时告警一次（用于发现水源/光照/拉杆异常）
 const STALL_WARN_SCANS = 10
+// 最小驻留时间：本状态是整个流程的枢纽（所有环路都经过它），
+// 若瞬间完成，环路会以接近零的间隔无限自转（实测 6 秒进入 21 次）
+const MIN_DWELL_MS = 3000
 
 class BehaviorWaitMaturity {
     constructor(bot, masterData) {
@@ -14,6 +17,7 @@ class BehaviorWaitMaturity {
         this.y = 350
         this.isFinished = false
         this.needsHarvest = false
+        this.enteredAt = 0
         this.startTime = 0
         this.lastScan = 0
         this.stallScans = 0
@@ -23,6 +27,7 @@ class BehaviorWaitMaturity {
     onStateEntered() {
         this.isFinished = false
         this.needsHarvest = false
+        this.enteredAt = Date.now()
         this.startTime = Date.now()
         this.lastScan = 0
         this.stallScans = 0
@@ -63,6 +68,9 @@ class BehaviorWaitMaturity {
         if (this.isFinished) return
 
         const now = Date.now()
+        // 驻留闸门：进入不足 MIN_DWELL_MS 时先不做扫描/判定，避免环路零间隔自转
+        if (now - this.enteredAt < MIN_DWELL_MS) return
+
         const interval = this.masterData.scanIntervalMs || 30000
         if (now - this.lastScan < interval) return
         this.lastScan = now
