@@ -15,6 +15,7 @@ const { StateTransition, BotStateMachine, NestedStateMachine } = require('minefl
 const { serverConfig, masterData, loadConfig, isInTerraces, isInPlantArea } = require('./config')
 const { configureMovements, stopMovement } = require('../../utils/movement')
 const { ClosableWebserver } = require('../../utils/closableWebserver')
+const { buildDashboardStatus } = require('./dashboardStatus')
 const { BehaviorWaitMaturity } = require('./behaviors/BehaviorWaitMaturity')
 const { BehaviorCheckHunger } = require('./behaviors/BehaviorCheckHunger')
 const { BehaviorEat } = require('./behaviors/BehaviorEat')
@@ -308,7 +309,12 @@ function setupStateMachine() {
 
     try {
         if (!webserver?.isServerRunning()) {
-            webserver = new ClosableWebserver(bot, stateMachine, masterData.webPort || 8936)
+            webserver = new ClosableWebserver(
+                bot,
+                stateMachine,
+                masterData.webPort || 8936,
+                () => buildDashboardStatus(bot, masterData)
+            )
             webserver.startServer()
             console.log(`[Web] 状态机可视化: http://localhost:${masterData.webPort || 8936}`)
         }

@@ -76,7 +76,7 @@ npm run daoxiang
 lp user daoxiang permission set minecraft.command.teleport true
 ```
 
-木桶里放好四种种子、附近箱子放面包和石锄。状态机可视化: http://localhost:8936
+木桶里放好四种种子、附近箱子放面包和石锄。状态机可视化: http://localhost:8936。DaoXiang 页面右上角同时显示生命/饥饿/饱和度、坐标、全背包物品数量，以及石锄数量与耐久；数据每秒刷新。
 
 ### 关键配置项（daoxiang_config.json）
 
