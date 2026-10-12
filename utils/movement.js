@@ -470,14 +470,21 @@ function isFacingFarmland(bot, soilPos) {
     return !!getCursorFarmland(bot, soilPos)
 }
 
-/** 是否站在目标耕地格上（X/Z 对齐） */
+/** 目标土壤格对应的脚部节点层：farmland 是 15/16 碰撞箱，dirt 是完整方块 */
+function getSoilFootY(bot, soilPos) {
+    const s = floorPos(soilPos)
+    const block = bot.blockAt(s)
+    // pathfinder 把 farmland 加入 carpets 后，farmland 站位节点仍是同一 block Y；
+    // dirt/full block 的脚部节点必须在方块上方一格。
+    return block?.name === 'farmland' ? s.y : s.y + 1
+}
+
+/** 是否确实站在目标土壤格上（校验 X/Y/Z，支持 trampled dirt 修复） */
 function isStandingOnSoil(bot, soilPos) {
     const s = floorPos(soilPos)
     const p = bot.entity.position
-    // 必须校验 Y：只比 X/Z 会把“站在上层耕地下方的泥土块”误判成站上了上层耕地。
-    // farmland 被加入 pathfinder.carpets 后，站在 y=69 farmland 时脚部 floor(Y)=69。
     return Math.floor(p.x) === s.x &&
-        Math.floor(p.y) === s.y &&
+        Math.floor(p.y) === getSoilFootY(bot, s) &&
         Math.floor(p.z) === s.z
 }
 
@@ -524,12 +531,14 @@ async function moveToStandOnSoil(bot, soilPos, options = {}) {
         // 农田格之间/跨一格台阶，用 pathfinder 的 XZ 目标定位到方块列；
         // 旧的 walkToFlat 是自定义直线控制，遇到低碰撞箱耕地可能停在相邻格，且吞掉了失败原因。
         try {
-            // farmland 已按 carpet 语义建模，pathfinder 的脚部节点 Y 与 farmland block Y 相同。
-            // 用精确 GoalBlock(x,y,z) 防止 GoalNearXZ 误停在上层耕地正下方的泥土格。
-            const goal = new goals.GoalBlock(soilPos.x, soilPos.y, soilPos.z)
-            // Teleporting to farmland's own block Y embeds the player in its 15/16 collision box;
-            // server collision correction can eject them under the farm into the water. Always land above it.
-            goal.teleportYOffset = options.teleportYOffset ?? 1
+            // 精确目标格：farmland 的 pathfinder 节点 Y=soilY；trampled dirt 是完整方块，站位节点 Y=soilY+1。
+            // GoalNearXZ 会忽略高度，可能停在上层地块正下方；GoalBlock 同时约束正确站立层。
+            const soilBlock = bot.blockAt(floorPos(soilPos))
+            const footY = soilBlock?.name === 'farmland' ? soilPos.y : soilPos.y + 1
+            const goal = new goals.GoalBlock(soilPos.x, footY, soilPos.z)
+            // farmland 方块本身的 tp 落点为 soilY+1；dirt 的 GoalBlock 已是表面脚部层，不再偏移。
+            const defaultTpOffset = soilBlock?.name === 'farmland' ? 1 : 0
+            goal.teleportYOffset = options.teleportYOffset ?? defaultTpOffset
             await pathfinderGoto(bot, goal, options.timeoutMs || 10000)
         } catch (e) {
             if (options.debugMovement) {
