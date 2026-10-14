@@ -36,7 +36,8 @@ class BehaviorWaitHarvest {
     }
 
     _stats() {
-        scanFarmingAreas(this.bot, this.masterData, isInTerraces)
+        // includeDirt：与 WaitMaturity/PlantSeeds 使用同一视野，统计口径一致
+        scanFarmingAreas(this.bot, this.masterData, isInTerraces, { includeDirt: true })
         const areas = Array.from(this.masterData.farmingAreas.values())
         const withCrop = areas.filter(a => a.hasCrop)
         const mature = areas.filter(a => a.isMature)

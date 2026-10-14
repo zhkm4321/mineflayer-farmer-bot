@@ -1,13 +1,13 @@
-const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const { pathfinderGoto, sleep, stopMovement } = require('../../../utils/movement')
+const { findLeverBlock, isLeverPowered } = require('../lever')
 
 /**
  * 拉杆操作（规则 2/3）。
- * 【实测】prismarine-block getProperties() 对 bool 状态返回真布尔值（true/false），
- * 不是字符串 —— 旧代码 `=== 'true'` 恒为 false，曾导致"拨成功却判失败→重试拨回"的震荡。
- * blockUpdate 用官方按坐标事件 `blockUpdate:(x,y,z)`（mineflayer 自动转发，
- * 官方插件 place_block.js/digging.js 均按此用法）。
+ * 拉杆查找/状态读取统一走 ../lever（与 PlantSeeds 的规则 3 检查共用，
+ * 避免"一边靠半径搜索、一边只认配置坐标"的不一致）。
+ * blockUpdate 用官方按坐标事件 `blockUpdate:(x, y, z)`（vec3 的 toString 恰好
+ * 是该格式，mineflayer 会把匹配的监听器转发到 bot.world）。
  */
 class BehaviorOperateLever {
     constructor(bot, masterData, mode) {
@@ -33,25 +33,11 @@ class BehaviorOperateLever {
     }
 
     _readPowered(block) {
-        return block?.getProperties?.()?.powered === true
+        return isLeverPowered(block)
     }
 
     _findLever() {
-        const L = this.masterData.lever
-        if (!L) return null
-        // 优先按配置坐标精确读取
-        const configured = this.bot.blockAt(new Vec3(L.x, L.y, L.z))
-        if (configured && configured.name === 'lever') return configured
-        // 配置坐标失效时按半径搜索（配置可能没跟上地形改动）
-        const found = this.bot.findBlock({
-            matching: block => block.name === 'lever',
-            maxDistance: 8,
-            point: new Vec3(L.x, L.y, L.z)
-        })
-        if (found) {
-            console.log(`[拉杆] 配置坐标无拉杆，在附近搜索到 (${found.position.x},${found.position.y},${found.position.z})`)
-        }
-        return found
+        return findLeverBlock(this.bot, this.masterData.lever)
     }
 
     _activateAndWaitUpdate(lever) {

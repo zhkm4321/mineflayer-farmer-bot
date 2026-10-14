@@ -50,9 +50,9 @@ class BehaviorGetSupplies {
         return inv.emptySlotCount()
     }
 
-    /** 扫描当前空地数量（排除不可种植地块） */
+    /** 扫描当前空地数量（排除不可种植地块）。dirt 也算空地（犁回后可种） */
     _countEmptyPlots() {
-        scanFarmingAreas(this.bot, this.masterData, isInTerraces)
+        scanFarmingAreas(this.bot, this.masterData, isInTerraces, { includeDirt: true })
         const areas = Array.from(this.masterData.farmingAreas.values())
         return areas.filter(a =>
             a.isEmpty &&
@@ -168,7 +168,7 @@ class BehaviorGetSupplies {
 
         for (const pos of barrels) {
             if (needed.length === 0) break
-            if (this.masterData.stopRequested) break
+            if (!this.active || this.masterData.stopRequested) break
             if (Date.now() - this.startTime > 120000) break
             const block = this.bot.blockAt(pos)
             if (!block) continue
@@ -221,7 +221,7 @@ class BehaviorGetSupplies {
 
         for (const pos of chests) {
             if (this._countItem(hoeItem) >= minHoes) break
-            if (this.masterData.stopRequested) break
+            if (!this.active || this.masterData.stopRequested) break
             const block = this.bot.blockAt(pos)
             if (!block) continue
             let chest = null
@@ -290,6 +290,12 @@ class BehaviorGetSupplies {
                 // _withdrawSeeds 内部先按 X/Z 行自动探测木桶（高度不依赖配置），
                 // 再导航到实际木桶位置并逐桶取种
                 await this._withdrawSeeds(needed)
+                // 状态已被超时/停止打断：孤儿 run() 就此收手，别再带着旧导航目标乱跑
+                if (!this.active || this.masterData.stopRequested) {
+                    this.shortage = true
+                    this.isFinished = true
+                    return
+                }
                 // 一个种子都没拿到 → 不去播种（去了也是 412 连败空转），进冷却等补货
                 const totalSeeds = this.masterData.seeds.reduce(
                     (sum, s) => sum + this._countItem(s.name), 0)
@@ -301,12 +307,17 @@ class BehaviorGetSupplies {
                     return
                 }
                 if (needed.some(t => t.need > 0 && this._countItem(t.name) === 0)) {
-                    console.log('[补给] 部分种子缺货（将按现有库存播种缺的类型）')
+                    console.log('[补给] 部分种子缺货（播种时将按现有库存分配配额）')
                 }
             }
 
             if (this._countItem(hoeItem) < minHoes) {
                 const hoesOk = await this._withdrawHoes()
+                if (!this.active || this.masterData.stopRequested) {
+                    this.shortage = true
+                    this.isFinished = true
+                    return
+                }
                 if (!hoesOk) {
                     console.log(`[补给] 箱子中锄头不足 (${this._countItem(hoeItem)}/${minHoes})，暂停播种`)
                     this.shortage = true
@@ -336,8 +347,12 @@ class BehaviorGetSupplies {
         // 【防重入】同上：置位后到转移前 update 仍会被反复调用，没闸门就会刷屏
         if (this.isFinished) return
         if (Date.now() - this.startTime > 300000) {
-            console.log('[补给] 超时，放弃本轮')
+            console.log('[补给] 超时，放弃本轮（按物资不足处理，进冷却）')
             stopMovement(this.bot)
+            // 【必须】给出诚实的退出标志：所有出转移都要求 shortage/noShortage 二选一，
+            // 只置 isFinished 不置标志会让状态机永久卡在本状态
+            this.shortage = true
+            this._setCooldown()
             this.isFinished = true
         }
     }

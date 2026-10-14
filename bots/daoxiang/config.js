@@ -72,9 +72,9 @@ const masterData = {
     supplyRetryAt: 0,        // 物资不足冷却（防 getSupplies↔waitMaturity 零间隔死循环）
     leverFailStreak: 0,
     lastLeverError: null,
+    navFailStreak: 0,        // 导航（gotoPlant/gotoHome）连续失败计数，>=3 告警
     harvestRound: 0,
     _needsHarvest: false,
-    _needsPlant: false,
     _eatRunId: 0
 }
 

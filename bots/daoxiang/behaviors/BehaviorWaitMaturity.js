@@ -42,7 +42,8 @@ class BehaviorWaitMaturity {
     }
 
     _stats() {
-        scanFarmingAreas(this.bot, this.masterData, isInTerraces)
+        // includeDirt：被踩成 dirt 的耕地也计入统计（否则 total 静默缩水、覆盖率虚高）
+        scanFarmingAreas(this.bot, this.masterData, isInTerraces, { includeDirt: true })
         const areas = Array.from(this.masterData.farmingAreas.values())
         const withCrop = areas.filter(a => a.hasCrop)
         const mature = areas.filter(a => a.isMature)
@@ -127,7 +128,6 @@ class BehaviorWaitMaturity {
 
     onStateExited() {
         this.masterData._needsHarvest = this.needsHarvest
-        this.masterData._needsPlant = !this.needsHarvest
         this.masterData.detailStatus = ''
     }
 }

@@ -6,8 +6,11 @@
  *   2. 播种前确认拉杆关闭（规则 3），从木桶取种子按比例播种（规则 5）
  *   3. 从附近容器自寻面包/石锄，保持饥饿值不低于 20%
  *   4. 用锄头修复被踩坏的耕地（dirt → farmland）
- *   5. 夜晚前往发呆点躲避幻翼
+ *   5. 夜晚前往发呆点躲避幻翼（夜间转移优先级仅次于"停止"，打断一切工作状态；
+ *      唯一例外是合计 ≤4 分钟的收割闭环，避免水阀开着过夜）
  *   6. tp 策略（规则 7）：目标 >200 格直传；寻路极端失败传回初始位置
+ *   7. 命令只认私聊（whisper）："daoxiang stop" 停止 / "daoxiang start" 恢复，
+ *      公屏聊天一律不响应
  */
 const mineflayer = require('mineflayer')
 const { StateTransition, BotStateMachine, NestedStateMachine } = require('mineflayer-statemachine')
@@ -87,7 +90,9 @@ async function forceEat(myRun) {
         }
 
         let lastErr = null
-        for (let attempt = 0; attempt < 3 && bot.food < 18; attempt++) {
+        // 与 BehaviorEat 对齐：吃到 20（面包 +5/个，从进食线 6 到满需 3 个；
+        // 留 5 次余量覆盖个别的 consume 取消重试）
+        for (let attempt = 0; attempt < 5 && bot.food < 20; attempt++) {
             bread = hasBread()
             if (!bread) break
             try {
@@ -99,7 +104,7 @@ async function forceEat(myRun) {
                 await new Promise(r => setTimeout(r, 1000))
             }
         }
-        if (bot.food < 18) {
+        if (bot.food < 20) {
             console.log(`[强制进食] 结束时食物仍为 ${bot.food}/20` +
                 (lastErr ? `，最后错误: ${lastErr.message}` : ''))
         }
@@ -114,18 +119,23 @@ async function forceEat(myRun) {
     }
 }
 
-// ---------------- 聊天命令 ----------------
+// ---------------- 私聊命令 ----------------
+// 【规则】只响应发给机器人的私聊（whisper）：daoxiang stop / daoxiang start。
+// 公屏聊天不注册任何监听，一律不响应，避免公屏误触发。
 function registerCommands() {
-    bot.on('chat', (username, message) => {
+    bot.on('whisper', (username, message) => {
         if (username === bot.username) return
-        const msg = message.trim()
-        if (msg === '稻香 停' || msg === 'daoxiang stop') {
+        const msg = message.trim().toLowerCase()
+        if (msg === 'daoxiang stop') {
             masterData.stopRequested = true
             masterData.isAutoFarming = false
             stopMovement(bot)
-            bot.chat('收到，停止工作')
-        } else if (msg === '稻香 状态' || msg === 'daoxiang status') {
-            bot.chat(`状态: ${masterData.detailStatus || '空闲'} | 食物 ${bot.food}/20 | 收割轮次 ${masterData.harvestRound}`)
+            bot.whisper(username, '收到，停止工作')
+        } else if (msg === 'daoxiang start') {
+            startFarming()
+            bot.whisper(username, '收到，开始工作')
+        } else if (msg === 'daoxiang status') {
+            bot.whisper(username, `状态: ${masterData.detailStatus || '空闲'} | 食物 ${bot.food}/20 | 收割轮次 ${masterData.harvestRound}`)
         }
     })
 }
@@ -179,8 +189,16 @@ function setupStateMachine() {
         })
     )
 
-    // [2] 夜晚发呆（规则 8；不覆盖收割等待，避免拉杆开着无人管）
-    const nightTransitions = [waitMaturity, idle].map(state =>
+    // [2] 夜晚发呆（规则 8）：幻翼会击杀夜间干活的机器人，所以夜间转移的优先级
+    //     高于除"停止"之外的一切工作状态（状态机按数组顺序取首个命中的转移）。
+    //     【唯一例外】收割闭环 activateLever → waitHarvest → deactivateLever 不打断：
+    //     三步各有硬超时、合计 ≤4 分钟，中途弃管会让水阀开着过夜（弃管后播种前的
+    //     规则 3 检查也能补救，但没必要冒险）；闭环一结束就从 getSupplies 立即转入夜间。
+    const nightTargets = [
+        waitMaturity, checkHunger, eat,
+        getSupplies, gotoPlant, plantSeeds, gotoHome, idle
+    ]
+    const nightTransitions = nightTargets.map(state =>
         new StateTransition({
             parent: state,
             child: nightIdle,
@@ -258,7 +276,10 @@ function setupStateMachine() {
         new StateTransition({
             parent: deactivateLever,
             child: getSupplies,
-            shouldTransition: () => deactivateLever.isFinished && deactivateLever.succeeded
+            shouldTransition: () => deactivateLever.isFinished && deactivateLever.succeeded,
+            // 收割闭环到此结束：清除"待收割"标志。否则 gotoPlant/gotoHome 导航失败
+            // 转回 checkHunger 时会带着过期标志误入 activateLever，把已关好的水阀再开一次
+            onTransition: () => { masterData._needsHarvest = false }
         }),
         new StateTransition({
             parent: deactivateLever,
@@ -389,6 +410,11 @@ function createBot() {
         const p = bot.entity.position
         console.log(`当前坐标: (${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)})`)
 
+        // 连接已确认存活：重连计数归零。
+        // 【修复】旧逻辑只增不减，跨多天累计断线 10 次后（哪怕每次都重连成功）
+        // 会误判"达到最大重连次数"直接退出进程
+        reconnectConfig.attempts = 0
+
         // 记录初始位置（规则 7：极端寻路失败时 tp 回这里）
         if (!masterData.homePos) {
             masterData.homePos = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) }
@@ -409,8 +435,9 @@ function createBot() {
             registerCommands()
 
             bot.on('health', () => {
+                // 与 BehaviorCheckHunger 用同一比较方向（<），阈值完全一致
                 const trigger = masterData.food.triggerPercent ?? 30
-                if (bot.food <= Math.ceil(20 * trigger / 100) && !masterData.isEating) {
+                if (bot.food < Math.ceil(20 * trigger / 100) && !masterData.isEating) {
                     console.log(`[警告] 食物值过低: ${bot.food}/20，强制进食`)
                     masterData.isEating = true
                     const myRun = ++masterData._eatRunId
@@ -421,7 +448,7 @@ function createBot() {
             masterData.isAutoFarming = true
             masterData.stopRequested = false
             console.log('[自动启动] DaoXiang 已上线，开始工作循环')
-            bot.chat(`稻香上线! 自动开始务农，输入 "daoxiang stop" 停止`)
+            bot.chat('稻香上线! 自动开始务农，私聊我 "daoxiang stop" 停止 / "daoxiang start" 恢复')
         } else {
             // 重生：状态机仍在运行，恢复寻路配置即可
             configureMovements(bot)

@@ -7,6 +7,7 @@ const {
 const { scanFarmingAreas } = require('../../../utils/farmScan')
 const { isPlantBlacklisted, addPlantBlacklist, isProtocolPlantFailure } = require('../../../utils/plantBlacklist')
 const { isInTerraces, isInPlantArea, isUnplantable } = require('../config')
+const { findLeverBlock, isLeverPowered } = require('../lever')
 
 const HOE_NAME_DEFAULT = 'stone_hoe'
 const SEED_FAIL_LIMIT = 8
@@ -51,17 +52,24 @@ class BehaviorPlantSeeds {
             .reduce((sum, i) => sum + i.count, 0)
     }
 
-    /** 规则 3：播种前确认拉杆关闭 */
+    /** 背包里是否还有指定种子 */
+    _hasSeed(seedName) {
+        return this.bot.inventory.items().some(i => i.name === seedName)
+    }
+
+    /** 规则 3：播种前确认拉杆关闭。
+     *  与 BehaviorOperateLever 共用同一查找逻辑（含半径回退搜索），
+     *  避免配置坐标失效时 OperateLever 拨对了搜索到的拉杆、
+     *  这里却只看配置坐标误判为"已关闭"。 */
     _isLeverOff() {
-        const L = this.masterData.lever
-        if (!L) return true
-        const lever = this.bot.blockAt(new Vec3(L.x, L.y, L.z))
-        if (!lever || lever.name !== 'lever') return true // 找不到拉杆时不阻塞播种
-        const powered = lever.getProperties?.()?.powered === true
-        if (powered) {
+        if (!this.masterData.lever) return true
+        const lever = findLeverBlock(this.bot, this.masterData.lever)
+        if (!lever) return true // 找不到拉杆时不阻塞播种
+        if (isLeverPowered(lever)) {
             console.log('[播种][规则3] 检测到拉杆仍处于开启状态，水流会冲走种子，先去关闭拉杆')
+            return false
         }
-        return !powered
+        return true
     }
 
     _canPlantAt(area) {
@@ -137,6 +145,10 @@ class BehaviorPlantSeeds {
      * kind=plant：真实种植失败（计入每种种子的熔断配额）
      */
     async _plantOne(area, seedName) {
+        // 【先查库存再动腿】缺该类种子时不必白跑到地块上才发现（旧逻辑要走过去才失败）
+        if (!this._hasSeed(seedName)) {
+            return { ok: false, kind: 'plant', reason: `没有种子(${seedName})` }
+        }
         if (!isStandingOnSoil(this.bot, area.soilPos)) {
             stopMovement(this.bot)
             const from = this.bot.entity.position.clone()
@@ -225,9 +237,10 @@ class BehaviorPlantSeeds {
             `守卫拦截${guardDelta}次, ${cells.join(', ')}`)
     }
 
-    /** 收集所有可播种的空地（排除规则 4 地块、黑名单、障碍） */
+    /** 收集所有可播种的空地（排除规则 4 地块、黑名单、障碍）。
+     *  includeDirt：被踩成 dirt 的耕地也收进来（站上去后先用锄头犁回，规则 8） */
     _collectEmptyPlots() {
-        scanFarmingAreas(this.bot, this.masterData, isInTerraces)
+        scanFarmingAreas(this.bot, this.masterData, isInTerraces, { includeDirt: true })
         const areas = Array.from(this.masterData.farmingAreas.values())
         return areas.filter(a =>
             a.isEmpty &&
@@ -283,21 +296,53 @@ class BehaviorPlantSeeds {
         return sorted
     }
 
+    /** 按比例分配作物（最大余数法），并考虑实际库存：
+     *  某类种子缺货时把它的配额按原比例让给还有库存的类型，
+     *  库存整体不足则只分配能种的部分（"按现有库存播种"的真正实现）。 */
     _assignSeedToPlots(sorted) {
         const seeds = this.masterData.seeds
         if (!seeds || seeds.length === 0) return []
-        const counts = this._allocateCounts(sorted.length, seeds)
-        const remaining = counts.slice()
-        console.log(`[播种] 配额: ${seeds.map((s, i) => `${s.name}=${counts[i]}`).join(', ')} (共${sorted.length}块)`)
+        const available = seeds.map(s => this._countItem(s.name))
+        const totalAvailable = available.reduce((a, b) => a + b, 0)
+        if (totalAvailable === 0) {
+            console.log('[播种] 库存没有任何种子，跳过分配')
+            return []
+        }
 
+        const counts = seeds.map(() => 0)
+        let remaining = sorted.length
+        let open = seeds.map((_, i) => i)   // 仍有库存余量的类型
+        while (remaining > 0 && open.length > 0) {
+            const sub = this._allocateCounts(remaining, open.map(i => seeds[i]))
+            let progressed = false
+            for (let k = 0; k < open.length; k++) {
+                const si = open[k]
+                const add = Math.min(sub[k], available[si] - counts[si])
+                if (add > 0) {
+                    counts[si] += add
+                    remaining -= add
+                    progressed = true
+                }
+            }
+            open = open.filter(si => available[si] - counts[si] > 0)
+            if (!progressed) break
+        }
+        if (remaining > 0) {
+            console.log(`[播种] 库存不足以覆盖全部空地，${remaining} 块本轮跳过`)
+        }
+        console.log(`[播种] 配额: ${seeds.map((s, i) => `${s.name}=${counts[i]}`).join(', ')} ` +
+            `(空地${sorted.length}块, 库存${totalAvailable})`)
+
+        // 交错分配，让各作物在田间大致按比例混布
         const assignments = []
         let idx = 0
+        const left = counts.slice()
         while (idx < sorted.length) {
             let progressed = false
             for (let si = 0; si < seeds.length; si++) {
-                if (remaining[si] <= 0) continue
+                if (left[si] <= 0) continue
                 assignments.push({ area: sorted[idx++], seedName: seeds[si].name })
-                remaining[si]--
+                left[si]--
                 progressed = true
                 if (idx >= sorted.length) break
             }
@@ -421,7 +466,8 @@ class BehaviorPlantSeeds {
                 if (done % 20 === 0) {
                     console.log(`[播种] 进度 ${done}/${assignments.length}，成功 ${planted}`)
                 }
-                await sleep(Math.min(perPlot, 200))
+                // 播种节奏：按 msPerPlot 配额 pacing（上限 5s 防手滑配置拖垮整轮）
+                await sleep(Math.min(perPlot, 5000))
             }
 
             console.log(`[播种] 本轮结束: 成功 ${planted}，失败 ${failed}` +

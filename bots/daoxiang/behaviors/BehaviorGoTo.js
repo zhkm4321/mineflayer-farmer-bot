@@ -140,7 +140,28 @@ class BehaviorGoTo {
             ok = false
         }
 
+        // 【被取代 ≠ 失败】夜间召回/用户停止会直接切走状态（onStateExited 已 stopMovement
+        // 取消寻路），孤儿 run() 到这里不算导航失败：不记失败连击、更不能触发 tp 回初始位置
+        // ——那会和 nightIdle 前往发呆点的导航互相打架。
+        if (!this.active || this.masterData.stopRequested) {
+            this.isFinished = true
+            return
+        }
+
         this.arrived = ok && this.bot.entity.position.distanceTo(new Vec3(target.x, target.y, target.z)) <= 8
+
+        // 导航连续失败熔断（对齐 leverFailStreak 风格）：
+        // gotoPlant↔checkHunger↔getSupplies 的失败重试环没有天然终点，
+        // 连续 3 次不到达就该喊人来看路径/地形/权限，而不是无限重试
+        if (this.arrived) {
+            this.masterData.navFailStreak = 0
+        } else {
+            this.masterData.navFailStreak = (this.masterData.navFailStreak || 0) + 1
+            if (this.masterData.navFailStreak >= 3) {
+                console.log(`[导航][告警] 连续 ${this.masterData.navFailStreak} 次未到达目标（${this.label}），请检查路径/地形/权限`)
+                try { this.bot.chat('DaoXiang 告警: 导航连续失败，请人工检查') } catch (e) { /* ignore */ }
+            }
+        }
 
         // rule 7-1：极端失败 → tp 回初始位置，从安全点重新决策
         if (!this.arrived && this.tpHomeOnFail && (this.masterData.tp?.enabled !== false)) {
