@@ -1,6 +1,7 @@
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const { pathfinderGoto, stopMovement, sleep } = require('../../../utils/movement')
+const { logImportant } = require('../../../utils/logger')
 
 const NIGHT_START = 12542
 const NIGHT_END = 23460
@@ -38,7 +39,7 @@ class BehaviorNightIdle {
         this.movedToSpot = false
         this.startTime = Date.now()
         this.masterData.detailStatus = '夜晚发呆'
-        console.log('[发呆] 夜晚降临，前往发呆点躲避幻翼')
+        logImportant('[发呆] 夜晚降临，前往发呆点躲避幻翼')
         this.run()
     }
 
@@ -92,7 +93,7 @@ class BehaviorNightIdle {
 
         // 天亮即结束（发呆点站桩）
         if (this.movedToSpot && !BehaviorNightIdle.isNight(this.bot)) {
-            console.log(`[发呆] 天亮了，继续干活 (时间: ${this.bot.time?.timeOfDay ?? '?'})`)
+            logImportant(`[发呆] 天亮了，继续干活 (时间: ${this.bot.time?.timeOfDay ?? '?'})`)
             this.isFinished = true
             return
         }

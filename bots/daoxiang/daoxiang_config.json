@@ -9,8 +9,9 @@
         "auth": "offline",
         "respawn": true
     },
-    "lever": { "x": 1027, "y": 70, "z": 570 },
-    "barrels": { "x": 1028, "y": 70, "zMin": 571, "zMax": 577 },
+    "lever": { "x": 1027, "y": 71, "z": 570 },
+    "barrels": { "x": 1028, "y": 71, "zMin": 571, "zMax": 577 },
+    "supplyChest": { "x": 1029, "y": 70, "z": 578 },
     "nightSpot": { "x": 1033, "y": 61, "z": 598 },
     "terraces": [
         { "minX": 1017, "maxX": 1024, "minZ": 571, "maxZ": 598, "y": 69 },
@@ -51,7 +52,7 @@
     },
     "plant": {
         "coverageThreshold": 90,
-        "msPerPlot": 1200,
+        "msPerPlot": 200,
         "maxTimeMs": 1800000
     },
     "scan": {

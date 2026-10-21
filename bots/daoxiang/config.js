@@ -9,6 +9,7 @@ const defaults = {
     server: { host: 'localhost', port: 22224, username: 'DaoXiang', version: '26.1', auth: 'offline' },
     lever: { x: 1027, y: 70, z: 570 },
     barrels: { x: 1028, y: 70, zMin: 571, zMax: 577 },
+    supplyChest: null,       // 面包/锄头补给箱锚点（半径搜索为空时的兜底目标）
     nightSpot: { x: 1033, y: 61, z: 598 },
     terraces: [],
     unplantable: [],
@@ -22,7 +23,7 @@ const defaults = {
     food: { breadItem: 'bread', triggerPercent: 30 },
     containerSearch: { radius: 24 },
     harvest: { maturityThreshold: 95, waitMaxSeconds: 60, waitMinSeconds: 10, doneRatio: 5 },
-    plant: { coverageThreshold: 90, msPerPlot: 1200, maxTimeMs: 1800000 },
+    plant: { coverageThreshold: 90, msPerPlot: 200, maxTimeMs: 1800000 },
     scan: { intervalMs: 30000 },
     tp: { enabled: true, farDistance: 200 },
     webPort: 8936,
@@ -35,6 +36,7 @@ const masterData = {
     // —— 流程锚点 ——
     lever: null,
     barrels: null,
+    supplyChest: null,       // 面包/锄头补给箱（含坐标则永远作为取食/取锄的兜底候选）
     nightSpot: null,
     terraces: [],
     unplantable: new Set(),   // "x,y,z" 键集合（rule 4：半砖下水坑地块不可种植）
@@ -103,6 +105,11 @@ function loadConfig() {
 
     masterData.lever = merged.lever
     masterData.barrels = merged.barrels
+    // 补给箱锚点：坐标不完整视为未配置
+    const sc = cfg.supplyChest
+    masterData.supplyChest = (sc && Number.isFinite(sc.x) && Number.isFinite(sc.y) && Number.isFinite(sc.z))
+        ? sc
+        : null
     masterData.nightSpot = merged.nightSpot
     masterData.terraces = Array.isArray(merged.terraces) ? merged.terraces : []
     masterData.waypoints = Array.isArray(cfg.waypoints) ? cfg.waypoints : []
@@ -141,6 +148,10 @@ function loadConfig() {
     console.log(`[配置] 拉杆: (${masterData.lever.x},${masterData.lever.y},${masterData.lever.z}) ` +
         `木桶行: X=${masterData.barrels.x} Z${masterData.barrels.zMin}~${masterData.barrels.zMax} ` +
         `(y=${masterData.barrels.y} 仅作提示，实际高度自动探测)`)
+    if (masterData.supplyChest) {
+        const s = masterData.supplyChest
+        console.log(`[配置] 补给箱(面包/锄头兜底): (${s.x},${s.y},${s.z})`)
+    }
     if (masterData.waypoints.length > 0) {
         console.log(`[配置] 路径点: ${masterData.waypoints.length} 个`)
     }
@@ -164,6 +175,7 @@ function saveConfig() {
             server: serverConfig,
             lever: masterData.lever,
             barrels: masterData.barrels,
+            supplyChest: masterData.supplyChest,
             nightSpot: masterData.nightSpot,
             terraces: masterData.terraces,
             unplantable: [...masterData.unplantable].map(k => {

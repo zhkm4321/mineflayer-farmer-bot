@@ -5,6 +5,7 @@ const {
     moveToStandOnSoil, faceDownAtFeetFarmland
 } = require('../../../utils/movement')
 const { scanFarmingAreas } = require('../../../utils/farmScan')
+const { logImportant } = require('../../../utils/logger')
 const { isPlantBlacklisted, addPlantBlacklist, isProtocolPlantFailure } = require('../../../utils/plantBlacklist')
 const { isInTerraces, isInPlantArea, isUnplantable } = require('../config')
 const { findLeverBlock, isLeverPowered } = require('../lever')
@@ -267,8 +268,12 @@ class BehaviorPlantSeeds {
         return counts
     }
 
-    /** 按高度分层（离 bot 最近的层优先），层内按距离排序 */
-    _sortPlotsByLayer(empties) {
+    /** 按高度分层（离 bot 最近的层优先），层内蛇形（S 形）扫描排序。
+     *  【为什么不用距离排序】旧逻辑按"距出发点的直线距离"排 —— 等距的地块在场上
+     *  围成一圈圈环，机器人沿环来回横跳，表现为反复横穿田地（实测效率极低）。
+     *  蛇形：行(z)间贪心链接相邻行、行内沿 x 单向扫、逐行掉头，一趟扫完一层；
+     *  层与层之间以上一层的终点作为下一层的起点参考，避免扫完还要跑回头路。 */
+    _orderPlotsBySweep(empties) {
         const botPos = this.bot.entity.position
         const layers = new Map()
         for (const area of empties) {
@@ -283,16 +288,55 @@ class BehaviorPlantSeeds {
             Math.abs(a - supportY) - Math.abs(b - supportY) || a - b
         )
         const sorted = []
+        let refPos = botPos   // 每层的起点参考：上一层扫完的终点
         for (const y of sortedY) {
-            const layer = layers.get(y)
-            layer.sort((a, b) =>
-                botPos.distanceTo(getStandCenterOnSoil(a.soilPos)) -
-                botPos.distanceTo(getStandCenterOnSoil(b.soilPos))
-            )
-            sorted.push(...layer)
+            const layerSorted = this._serpentineWithinLayer(layers.get(y), refPos)
+            if (layerSorted.length > 0) {
+                const last = layerSorted[layerSorted.length - 1].soilPos
+                refPos = getStandCenterOnSoil(last)
+            }
+            sorted.push(...layerSorted)
         }
         console.log(`[播种] 当前支撑层 Y=${supportY}，分层顺序: ` +
-            sortedY.map(y => `Y=${y}(${layers.get(y).length}块)`).join(' → '))
+            sortedY.map(y => `Y=${y}(${layers.get(y).length}块)`).join(' → ') + '（层内蛇形扫描）')
+        return sorted
+    }
+
+    /** 单层内蛇形排序：行按相邻链接（从参考点最近的行开始，先扫完一个方向到边界，
+     *  再回头扫另一侧），行内 x 单向、逐行掉头 —— 相邻两行的起终点只差一格。 */
+    _serpentineWithinLayer(areas, refPos) {
+        if (areas.length === 0) return []
+
+        const rows = new Map()
+        for (const a of areas) {
+            const z = a.soilPos.z
+            if (!rows.has(z)) rows.set(z, [])
+            rows.get(z).push(a)
+        }
+
+        // 行访问顺序：每次选离上一行最近的未访问行 → 行间始终相邻
+        const pending = [...rows.keys()]
+        const rowOrder = []
+        let lastZ = Math.floor(refPos.z)
+        while (pending.length > 0) {
+            pending.sort((a, b) => Math.abs(a - lastZ) - Math.abs(b - lastZ))
+            const next = pending.shift()
+            rowOrder.push(next)
+            lastZ = next
+        }
+
+        const sorted = []
+        let forward = null   // 行内 x 方向：首行取离参考点近的一端，之后逐行掉头
+        for (const z of rowOrder) {
+            const row = rows.get(z).sort((a, b) => a.soilPos.x - b.soilPos.x)
+            if (forward === null) {
+                forward = Math.abs(row[0].soilPos.x - refPos.x) <=
+                    Math.abs(row[row.length - 1].soilPos.x - refPos.x)
+            } else {
+                forward = !forward
+            }
+            sorted.push(...(forward ? row : row.slice().reverse()))
+        }
         return sorted
     }
 
@@ -378,7 +422,7 @@ class BehaviorPlantSeeds {
                 return
             }
 
-            const sorted = this._sortPlotsByLayer(empties)
+            const sorted = this._orderPlotsBySweep(empties)
             const assignments = this._assignSeedToPlots(sorted)
             if (assignments.length === 0) {
                 console.log('[播种] 种子分配为空（可能没有任何库存种子）')
@@ -470,8 +514,8 @@ class BehaviorPlantSeeds {
                 await sleep(Math.min(perPlot, 5000))
             }
 
-            console.log(`[播种] 本轮结束: 成功 ${planted}，失败 ${failed}` +
-                (planted > 0 ? '' : '（若全部为移动失败，请把上方[播种][诊断]日志发出来）'))
+            logImportant(`[播种] 本轮结束: 成功 ${planted}，失败 ${failed}` +
+                (planted > 0 ? '' : '（若全部为移动失败，请查看日志文件中[播种][诊断]段落）'))
         } catch (e) {
             console.log(`[播种] 异常: ${e.message}`)
         }

@@ -3,6 +3,7 @@ const { openChestContainer } = require('../../../utils/container')
 const { scanFarmingAreas } = require('../../../utils/farmScan')
 const { pathfinderGoto, stopMovement, sleep } = require('../../../utils/movement')
 const { isInTerraces, isUnplantable } = require('../config')
+const { findSupplyContainers, HOE_CONTAINER_KINDS } = require('../containers')
 const { goals } = require('mineflayer-pathfinder')
 
 // 物资不足后的重试冷却：防止 supplies↔waitMaturity 零间隔死循环（FarmMaster 教训）
@@ -131,7 +132,26 @@ class BehaviorGetSupplies {
     async _withdrawSeeds(needed) {
         let barrels = this._findBarrels()
 
-        // 当前站位扫不到桶：按配置 X/Z 行走过去（GoalNearXZ 不依赖任何高度），到了再扫一遍
+        // 当前站位扫不到桶：先尝试走配置的路径点走廊（与 gotoHome 同向使用，
+        // 用于绕开直线路径上的卡点，如 X1027 一带的石砖墙角），走到后再扫一遍
+        if (barrels.length === 0 && (this.masterData.waypoints?.length || 0) > 0) {
+            const wps = this.masterData.waypoints.slice().reverse()
+            console.log(`[补给] 站位附近未探到木桶，先走路径点走廊 ${wps.length} 个再扫`)
+            for (let i = 0; i < wps.length; i++) {
+                if (!this.active || this.masterData.stopRequested) return false
+                const w = wps[i]
+                try {
+                    await pathfinderGoto(this.bot, new goals.GoalNearXZ(w.x, w.z, 3), 45000)
+                } catch (e) {
+                    console.log(`[补给] 路径点 ${i + 1}/${wps.length} 失败: ${e.message}（继续下一个）`)
+                }
+                await sleep(200)
+                barrels = this._findBarrels()
+                if (barrels.length > 0) break
+            }
+        }
+
+        // 走廊走完仍扫不到桶：按配置 X/Z 行盲走过去（GoalNearXZ 不依赖任何高度），到了再扫一遍
         if (barrels.length === 0 && this.masterData.barrels) {
             const b = this.masterData.barrels
             const midZ = Math.floor((b.zMin + b.zMax) / 2)
@@ -156,12 +176,19 @@ class BehaviorGetSupplies {
         if (this.bot.entity.position.distanceTo(new Vec3(first.x, first.y, first.z)) > 4) {
             console.log(`[补给] 前往木桶 (${first.x},${first.y},${first.z})`)
             stopMovement(this.bot)
+            let navFailed = false
             try {
                 const goal = new goals.GoalNear(first.x, first.y, first.z, 2)
                 goal.teleportYOffset = 1
                 await pathfinderGoto(this.bot, goal, 45000)
             } catch (e) {
+                navFailed = true
                 console.log(`[补给] 前往木桶失败: ${e.message}（仍尝试开桶，交互距离可达 4.5 格）`)
+            }
+            if (navFailed) {
+                // 直连路线被地形卡死（如墙角贴跳）：给出可操作的绕行建议
+                console.log('[补给][提示] 若频繁卡在去木桶的路上，可在配置 waypoints 里加入绕行路径点' +
+                    '（补给与播种导航都会走），或给 bot 传送权限让 /tp 脱困生效')
             }
             await sleep(300)
         }
@@ -208,16 +235,18 @@ class BehaviorGetSupplies {
         return needed.length === 0
     }
 
-    /** 从附近箱子取石锄（规则 8） */
+    /** 从附近箱子取石锄（规则 8）。
+     *  候选 = 半径搜索 + 配置 supplyChest 锚点兜底（findSupplyContainers 负责）。 */
     async _withdrawHoes() {
         const hoeItem = this.masterData.tools.hoeItem || 'stone_hoe'
         const minHoes = this.masterData.tools.minHoes || 2
         const radius = this.masterData.containerSearchRadius || 24
-        const chests = this.bot.findBlocks({
-            matching: b => b.name === 'chest' || b.name === 'trapped_chest',
-            maxDistance: radius,
-            count: 10
-        }).sort((a, b) => this.bot.entity.position.distanceTo(a) - this.bot.entity.position.distanceTo(b))
+        const chests = await findSupplyContainers(this.bot, this.masterData, HOE_CONTAINER_KINDS, radius)
+
+        if (chests.length === 0) {
+            console.log(`[补给] 半径 ${radius} 内没有找到任何木箱` +
+                (this.masterData.supplyChest ? '（配置的补给箱也未检出，请检查坐标处是否放了箱子）' : ''))
+        }
 
         for (const pos of chests) {
             if (this._countItem(hoeItem) >= minHoes) break

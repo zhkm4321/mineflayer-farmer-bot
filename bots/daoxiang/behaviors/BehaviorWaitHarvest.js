@@ -1,4 +1,5 @@
 const { scanFarmingAreas } = require('../../../utils/farmScan')
+const { logImportant } = require('../../../utils/logger')
 const { isInTerraces } = require('../config')
 
 const SCAN_INTERVAL_MS = 4000
@@ -50,8 +51,8 @@ class BehaviorWaitHarvest {
     }
 
     _finish(reason) {
-        console.log(`[收割等待] ${reason}`)
         this.masterData.harvestRound = (this.masterData.harvestRound || 0) + 1
+        logImportant(`[收割] 第 ${this.masterData.harvestRound} 轮收割完成: ${reason}`)
         this.isFinished = true
     }
 

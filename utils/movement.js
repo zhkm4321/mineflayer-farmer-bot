@@ -183,19 +183,24 @@ async function pathfinderGoto(bot, goal, timeoutMs) {
     const stuckChecker = () => {
         if (bailed) return
         const pos = bot.entity.position
-        const moved = pos.distanceTo(lastPos)
+        // 【只看水平位移】贴墙原地跳（y 方向 0↔0.8 振荡、x/z 冻结）在旧的三维位移判定里
+        // 被当成"在移动"，stuckTicks 反复清零，10s /tp 脱困永远不触发
+        // （实测卡墙角：卡住计数 2→0→4→0 循环，磨满 45s 整段超时）。
+        // 合法的跳跃前进每个采样周期水平位移远大于阈值，不受影响；
+        // 纯垂直通道（梯子/气泡柱）超过 10s 会被误判 —— 本农田地形没有这类结构。
+        const horizMoved = Math.hypot(pos.x - lastPos.x, pos.z - lastPos.z)
         // 每 3 秒汇报一次：位置 / 速度 / 剩余距离 / 是否在移动。
         // 光看 "timeout" 无法区分"真的没路"和"原地卡死"，这里把过程打出来
         if (Date.now() - lastPathUpdate > 3000) {
             lastPathUpdate = Date.now()
             const elapsed = ((Date.now() - startedAt) / 1000).toFixed(0)
-            const speed = (moved / 0.25).toFixed(2)
+            const speed = (horizMoved / 0.25).toFixed(2)
             const dist = hasTarget ? pos.distanceTo(new Vec3(goal.x, goal.y, goal.z)).toFixed(1) : '?'
             const status = bot.pathfinder.isMoving?.() ? '移动中' : '未移动'
             console.log(`[寻路] ${elapsed}s 坐标(${pos.x.toFixed(1)},${pos.y.toFixed(1)},${pos.z.toFixed(1)}) ` +
                 `速度${speed}/s 距目标 ${dist} 格 ${status} 卡住计数${stuckTicks}`)
         }
-        if (moved < 0.03) {
+        if (horizMoved < 0.03) {
             stuckTicks++
             if (stuckTicks >= 3 && bot.entity.onGround) {
                 // 守卫连续拦截跳跃 → 这一段路非要跳不可，早点报错

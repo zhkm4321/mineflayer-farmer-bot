@@ -1,5 +1,7 @@
 const { openChestContainer } = require('../../../utils/container')
 const { stopMovement, sleep } = require('../../../utils/movement')
+const { logImportant } = require('../../../utils/logger')
+const { findSupplyContainers, BREAD_CONTAINER_KINDS } = require('../containers')
 
 /**
  * 进食：优先吃背包里的面包；没有则自己搜索附近木箱取面包（规则 8）。
@@ -34,19 +36,15 @@ class BehaviorEat {
         return this.bot.inventory.items().find(i => i.name === name)
     }
 
-    /** 搜索附近木箱/木桶取面包（规则 8：需要机器人自己寻找） */
+    /** 搜索附近木箱/木桶取面包（规则 8：需要机器人自己寻找）。
+     *  候选 = 半径搜索 + 配置 supplyChest 锚点兜底（findSupplyContainers 负责）。 */
     async fetchBreadFromContainers() {
         const radius = this.masterData.containerSearchRadius || 24
-        const containers = this.bot.findBlocks({
-            matching: b => ['chest', 'trapped_chest', 'barrel'].includes(b.name),
-            maxDistance: radius,
-            count: 10
-        }).sort((a, b) =>
-            this.bot.entity.position.distanceTo(a) - this.bot.entity.position.distanceTo(b)
-        )
+        const containers = await findSupplyContainers(this.bot, this.masterData, BREAD_CONTAINER_KINDS, radius)
 
         if (containers.length === 0) {
-            console.log(`[进食] 半径 ${radius} 内没有找到任何箱子/木桶`)
+            console.log(`[进食] 半径 ${radius} 内没有找到任何箱子/木桶` +
+                (this.masterData.supplyChest ? '（配置的补给箱也未检出，请检查坐标处是否放了箱子）' : ''))
             return false
         }
 
@@ -88,7 +86,7 @@ class BehaviorEat {
             }
 
             if (!bread) {
-                console.log('[进食] 背包和附近容器中都没有面包（请补充面包库存）')
+                logImportant('[进食][告警] 背包和附近容器中都没有面包（请补充面包库存）')
                 this.isFinished = true
                 return
             }
